@@ -1,0 +1,12 @@
+# Build output
+server/**/bin/
+server/**/obj/
+server/Cmux.Web/wwwroot/
+dist/
+
+# Node
+web/node_modules/
+web/dist/
+
+# Local state / logs
+*.log
