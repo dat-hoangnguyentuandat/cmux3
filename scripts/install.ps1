@@ -2,7 +2,7 @@
 # %LOCALAPPDATA%\Programs\cmux3 and puts cmux3 on the user PATH.
 #
 # One-liner:
-#   irm https://raw.githubusercontent.com/decolua/cmux3/main/scripts/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/dat-hoangnguyentuandat/cmux3/main/scripts/install.ps1 | iex
 #
 # Pin a version:
 #   $env:CMUX_VERSION="v0.1.0"; irm .../install.ps1 | iex
@@ -10,7 +10,7 @@
 # Override the source repo with $env:CMUX_REPO="owner/name".
 $ErrorActionPreference = "Stop"
 
-$repo    = if ($env:CMUX_REPO)    { $env:CMUX_REPO }    else { "decolua/cmux3" }
+$repo    = if ($env:CMUX_REPO)    { $env:CMUX_REPO }    else { "dat-hoangnguyentuandat/cmux3" }
 $version = if ($env:CMUX_VERSION) { $env:CMUX_VERSION } else { "latest" }
 $runtime = "win-x64"
 $asset   = "cmux3-$runtime.zip"

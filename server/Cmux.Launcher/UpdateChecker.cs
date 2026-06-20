@@ -13,7 +13,7 @@ internal static class UpdateChecker
 {
     // Override with CMUX_REPO=owner/name if the project moves.
     private static string Repo =>
-        Environment.GetEnvironmentVariable("CMUX_REPO") ?? "decolua/cmux3";
+        Environment.GetEnvironmentVariable("CMUX_REPO") ?? "dat-hoangnguyentuandat/cmux3";
 
     private static readonly HttpClient Http = CreateClient();
 
