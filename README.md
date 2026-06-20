@@ -53,7 +53,7 @@ Install (or update) with one line in PowerShell — no .NET or Node needed,
 it downloads a self-contained build from the latest GitHub release:
 
 ```powershell
-irm https://raw.githubusercontent.com/decolua/cmux3/main/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/dat-hoangnguyentuandat/cmux3/main/scripts/install.ps1 | iex
 ```
 
 This drops cmux3 into `%LOCALAPPDATA%\Programs\cmux3` and adds it to your PATH.
