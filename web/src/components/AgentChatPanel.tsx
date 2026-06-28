@@ -1,21 +1,95 @@
-import { useEffect, useRef, useState } from "react";
-import { api } from "../lib/api";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { api, type AgentMessage, type AgentThread } from "../lib/api";
 import { renderMarkdown } from "../lib/markdown";
 
-interface Msg { id: string; role: string; content: string; }
+interface Msg {
+  id: string;
+  threadId: string;
+  role: "user" | "assistant" | "system" | "error";
+  content: string;
+  createdAtUtc?: string;
+  provider?: string;
+  model?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+}
+
+interface ProviderOption {
+  key: string;
+  provider: string;
+  customName?: string;
+  label: string;
+  model: string;
+}
 
 interface Props {
   paneId?: string;
   onClose: () => void;
 }
 
-export function AgentChatPanel({ paneId, onClose }: Props) {
+export function AgentChatPanel({ paneId }: Props) {
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
-  const [status, setStatus] = useState("");
+  const [status, setStatus] = useState("Idle");
+  const [usage, setUsage] = useState("Usage: -");
+  const [context, setContext] = useState("Context: -");
   const [busy, setBusy] = useState(false);
+  const [agentSettings, setAgentSettings] = useState<any>(null);
+  const [providerMenu, setProviderMenu] = useState(false);
+  const [threads, setThreads] = useState<AgentThread[]>([]);
+  const [threadSearch, setThreadSearch] = useState("");
+  const [messageSearch, setMessageSearch] = useState("");
+  const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
   const threadRef = useRef<string | undefined>(undefined);
   const bodyRef = useRef<HTMLDivElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const providerOptions = useMemo(() => buildProviderOptions(agentSettings), [agentSettings]);
+  const activeProvider = useMemo(() => {
+    const active = (agentSettings?.activeProvider ?? "openai").toLowerCase();
+    if (active === "custom") {
+      const name = agentSettings?.activeCustomProviderName ?? "";
+      return providerOptions.find((p) => p.provider === "custom" && p.customName === name) ?? providerOptions.find((p) => p.provider === "custom");
+    }
+    return providerOptions.find((p) => p.provider === active) ?? providerOptions[0];
+  }, [agentSettings, providerOptions]);
+
+  const loadThreadMessages = useCallback(async (threadId: string) => {
+    try {
+      const msgs = await api.getThreadMessages(threadId);
+      setMessages(msgs.map(toMsg));
+      updateUsageFromMessages(msgs, setUsage);
+    } catch {
+      setMessages([]);
+      setUsage("Usage: -");
+    }
+  }, []);
+
+  const refreshThreads = useCallback(async (preferredThreadId?: string) => {
+    try {
+      const all = await api.getThreads();
+      setThreads(all);
+      const preferred = preferredThreadId || threadRef.current || selectedThreadId;
+      const next = (preferred && all.find((t) => t.id === preferred)) || all[0];
+      if (next && next.id !== threadRef.current) {
+        threadRef.current = next.id;
+        setSelectedThreadId(next.id);
+        await loadThreadMessages(next.id);
+      } else if (!next) {
+        threadRef.current = undefined;
+        setSelectedThreadId(null);
+        setMessages([]);
+        setUsage("Usage: -");
+      }
+    } catch { /* ignore */ }
+  }, [loadThreadMessages, selectedThreadId]);
+
+  useEffect(() => {
+    api.getAgentSettings().then(setAgentSettings).catch(() => {});
+    void refreshThreads();
+  }, [refreshThreads]);
 
   useEffect(() => {
     const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -24,72 +98,380 @@ export function AgentChatPanel({ paneId, onClose }: Props) {
       try {
         const u = JSON.parse(e.data);
         if (paneId && u.paneId && u.paneId !== paneId) return;
-        if (u.type === "ThreadChanged") threadRef.current = u.threadId;
-        else if (u.type === "UserMessage") {
-          setMessages((m) => [...m, { id: u.messageId || crypto.randomUUID(), role: "user", content: u.message }]);
+        if (u.type === "ThreadChanged") {
+          threadRef.current = u.threadId;
+          setSelectedThreadId(u.threadId);
+          setStatus("Thread selected");
+        } else if (u.type === "UserMessage") {
+          appendMessage({ id: u.messageId || crypto.randomUUID(), threadId: u.threadId, role: "user", content: u.message, createdAtUtc: u.createdAtUtc });
+          setStatus("User message sent");
         } else if (u.type === "AssistantDelta") {
           setBusy(true);
-          setMessages((m) => {
-            const last = m[m.length - 1];
-            if (last && last.role === "assistant" && last.id === u.messageId)
-              return [...m.slice(0, -1), { ...last, content: last.content + u.message }];
-            return [...m, { id: u.messageId || crypto.randomUUID(), role: "assistant", content: u.message }];
-          });
+          setStatus("Streaming response...");
+          setMessages((m) => upsertStreamingMessage(m, u.threadId, u.messageId, u.message));
         } else if (u.type === "AssistantCompleted") {
           setBusy(false);
-          setMessages((m) => {
-            const last = m[m.length - 1];
-            if (last && last.role === "assistant" && u.message)
-              return [...m.slice(0, -1), { ...last, content: u.message }];
-            return m;
-          });
-        } else if (u.type === "Status") setStatus(u.message);
-        else if (u.type === "Error") { setBusy(false); setStatus("Error: " + u.message); }
+          finalizeAssistant(u);
+          setUsage(`Usage: in ${u.inputTokens ?? 0} · out ${u.outputTokens ?? 0} · total ${u.totalTokens ?? 0}`);
+          updateContextLabel(u);
+          setStatus("Response completed");
+          void refreshThreads(u.threadId);
+        } else if (u.type === "ContextMetrics") {
+          updateContextLabel(u);
+        } else if (u.type === "Status") {
+          setStatus(u.message || "Idle");
+        } else if (u.type === "Error") {
+          setBusy(false);
+          appendMessage({ id: u.messageId || crypto.randomUUID(), threadId: u.threadId, role: "error", content: u.message, createdAtUtc: u.createdAtUtc });
+          setStatus("Error: " + u.message);
+        }
       } catch { /* ignore */ }
     };
     return () => ws.close();
-  }, [paneId]);
+  }, [paneId, refreshThreads]);
 
-  useEffect(() => { bodyRef.current?.scrollTo(0, bodyRef.current.scrollHeight); }, [messages]);
+  useEffect(() => { bodyRef.current?.scrollTo(0, bodyRef.current.scrollHeight); }, [messages, messageSearch]);
+
+  const appendMessage = (msg: Msg) => {
+    setMessages((m) => {
+      if (msg.id && m.some((x) => x.id === msg.id)) return m;
+      return [...m, msg];
+    });
+  };
+
+  const finalizeAssistant = (u: any) => {
+    setMessages((m) => {
+      const id = u.messageId || `stream-${u.threadId}`;
+      const next: Msg = {
+        id,
+        threadId: u.threadId,
+        role: "assistant",
+        content: u.message,
+        createdAtUtc: u.createdAtUtc,
+        provider: u.provider,
+        model: u.model,
+        inputTokens: u.inputTokens,
+        outputTokens: u.outputTokens,
+        totalTokens: u.totalTokens,
+      };
+      const idx = m.findIndex((x) => x.id === id || (x.id === `stream-${u.threadId}` && x.role === "assistant"));
+      if (idx < 0) return [...m, next];
+      return [...m.slice(0, idx), next, ...m.slice(idx + 1)];
+    });
+  };
+
+  const updateContextLabel = (u: any) => {
+    setContext(u.contextBudgetTokens > 0
+      ? `Context: ${u.estimatedContextTokens ?? 0}/${u.contextBudgetTokens} tokens${u.contextNeedsCompaction ? " (near limit)" : ""}${u.compactionApplied ? " · compacted" : ""}`
+      : "Context: -");
+  };
+
+  const newThread = async () => {
+    if (!paneId) { setStatus("No active pane selected"); return; }
+    try {
+      const thread = await api.createThread(paneId);
+      threadRef.current = thread.id;
+      setSelectedThreadId(thread.id);
+      setMessages([]);
+      setUsage("Usage: -");
+      setStatus("New thread created");
+      await refreshThreads(thread.id);
+    } catch {
+      threadRef.current = undefined;
+      setSelectedThreadId(null);
+      setMessages([]);
+      setUsage("Usage: -");
+      setStatus("New thread ready");
+    }
+  };
+
+  const deleteThread = async () => {
+    const id = selectedThreadId || threadRef.current;
+    if (!id) { setStatus("Select a thread to delete"); return; }
+    const selected = threads.find((t) => t.id === id);
+    if (!confirm(`Delete thread '${selected?.title ?? id}' and all its messages?`)) return;
+    try {
+      await api.deleteThread(id);
+      threadRef.current = undefined;
+      setSelectedThreadId(null);
+      setMessages([]);
+      setUsage("Usage: -");
+      await refreshThreads();
+      setStatus("Thread deleted");
+    } catch { setStatus("Failed to delete thread"); }
+  };
+
+  const deleteMessage = async (msg: Msg) => {
+    if (!msg.threadId || !msg.id || msg.id.startsWith("stream-")) return;
+    try {
+      await api.deleteThreadMessage(msg.threadId, msg.id);
+      setMessages((m) => m.filter((x) => x.id !== msg.id));
+      await refreshThreads(msg.threadId);
+      setStatus("Message deleted");
+    } catch {
+      setStatus("Failed to delete message");
+    }
+  };
+
+  const selectThread = async (thread: AgentThread) => {
+    setSelectedThreadId(thread.id);
+    threadRef.current = thread.id;
+    setStatus("Thread selected");
+    await loadThreadMessages(thread.id);
+  };
 
   const send = async () => {
     const prompt = input.trim();
-    if (!prompt || !paneId) return;
+    if (!prompt) return;
+    if (prompt === "/clear") { setMessages([]); setInput(""); setStatus("Messages cleared"); return; }
+    if (prompt === "/new-thread") { setInput(""); await newThread(); return; }
+    if (prompt === "/context") { setInput(""); setStatus(context); return; }
+    if (prompt === "/help") { setInput(""); setStatus("Commands: /clear /new-thread /context /help"); return; }
+    if (!paneId) { setStatus("No active pane selected"); return; }
+
     setInput("");
     const r = await api.sendAgentPrompt(paneId, prompt, threadRef.current);
-    if (!r.ok) setStatus(r.error || "Failed to send");
+    if (!r.ok) setStatus(r.error || "Agent did not accept the prompt");
     else if (r.threadId) threadRef.current = r.threadId;
   };
 
+  const chooseProvider = async (option: ProviderOption) => {
+    if (!agentSettings) return;
+    const next = {
+      ...agentSettings,
+      activeProvider: option.provider,
+      activeCustomProviderName: option.customName ?? agentSettings.activeCustomProviderName,
+    };
+    setAgentSettings(next);
+    setProviderMenu(false);
+    try {
+      await api.saveAgentSettings(next);
+      setStatus(`Provider: ${option.label}`);
+    } catch {
+      setStatus("Failed to save provider");
+    }
+  };
+
+  const attachImage = () => imageInputRef.current?.click();
+  const attachFile = () => fileInputRef.current?.click();
+
+  const onImageChosen = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setInput((prev) => appendPath(prev, file.name));
+    e.target.value = "";
+  };
+
+  const onFileChosen = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setInput((prev) => appendPath(prev, file.name));
+    e.target.value = "";
+  };
+
+  const filteredThreads = threadSearch
+    ? threads.filter((t) => `${t.title} ${t.lastMessagePreview} ${t.agentName}`.toLowerCase().includes(threadSearch.toLowerCase()))
+    : threads;
+  const visibleMessages = messageSearch
+    ? messages.filter((m) => messageMatches(m, messageSearch))
+    : messages;
+
   return (
-    <div className="overlay" onMouseDown={onClose}>
-      <div className="panel right" onMouseDown={(e) => e.stopPropagation()}>
-        <div className="panel-head">
-          <h2>Agent Chat</h2>
-          <button className="icon-btn" onClick={onClose}>×</button>
-        </div>
-        <div className="panel-body" ref={bodyRef}>
-          {!paneId && <div className="empty">Focus a pane to chat</div>}
-          {messages.length === 0 && paneId && <div className="empty dim">Ask the agent anything. Configure it in Settings → Agent.</div>}
-          {messages.map((m) => (
-            <div key={m.id} className={"chat-msg " + m.role}>
-              <div className="chat-role dim">{m.role}</div>
-              <div className="agent-content md" dangerouslySetInnerHTML={{ __html: renderMarkdown(m.content) }} />
-            </div>
-          ))}
-          {busy && <div className="dim">…thinking</div>}
-        </div>
-        {status && <div className="chat-status dim">{status}</div>}
-        <div className="chat-input">
-          <textarea
-            placeholder="Message the agent (Enter to send, Shift+Enter for newline)"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
+    <div className="cmux-panel cmux-agent-chat">
+      <div className="cmux-chat-threadbar">
+        <SearchIcon className="cmux-search-icon" />
+        <input
+          className="cmux-chat-search"
+          value={threadSearch}
+          onChange={(e) => setThreadSearch(e.target.value)}
+          title="Search threads"
+        />
+        <button className="cmux-icon-btn" onClick={newThread} title="New thread"><PlusIcon /></button>
+        <button className="cmux-icon-btn" onClick={deleteThread} title="Delete selected thread"><TrashIcon /></button>
+        <button className="cmux-icon-btn" onClick={() => refreshThreads()} title="Refresh threads"><RefreshIcon /></button>
+      </div>
+
+      <div className="cmux-chat-threads">
+        {filteredThreads.map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            className={"cmux-thread-item" + (t.id === selectedThreadId ? " active" : "")}
+            onClick={() => selectThread(t)}
+          >
+            <span className="cmux-thread-title">{t.title}</span>
+            <span className="cmux-thread-meta dim">{formatThreadMeta(t)}</span>
+          </button>
+        ))}
+      </div>
+
+      <div className="cmux-chat-info">
+        <div>{busy ? "Streaming response..." : status}</div>
+        <div>{usage}</div>
+        <div>{context}</div>
+        <div className="cmux-message-search-row">
+          <SearchIcon className="cmux-search-icon" />
+          <input
+            className="cmux-chat-search"
+            value={messageSearch}
+            onChange={(e) => setMessageSearch(e.target.value)}
+            title="Search within selected thread"
           />
-          <button className="primary" onClick={send} disabled={!paneId}>Send</button>
         </div>
+      </div>
+
+      <div className="cmux-chat-body" ref={bodyRef}>
+        {!paneId && <div className="cmux-empty">Focus a pane to chat</div>}
+        {visibleMessages.map((m) => (
+          <div key={m.id} className={"cmux-chat-msg " + m.role}>
+            <div className="cmux-chat-msg-main">
+              <div className="cmux-chat-role">{messageHeader(m)}</div>
+              <div className="cmux-chat-content md" dangerouslySetInnerHTML={{ __html: renderMarkdown(m.content) }} />
+              <div className="cmux-chat-meta dim mono">{messageMeta(m)}</div>
+            </div>
+            <button className="cmux-icon-btn cmux-chat-delete" onClick={() => deleteMessage(m)} title="Delete this message"><TrashIcon /></button>
+          </div>
+        ))}
+      </div>
+
+      <div className="cmux-agent-input-wrap">
+        <textarea
+          className="cmux-agent-textarea"
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
+        />
+        <div className="cmux-agent-input-bar">
+          <div style={{ position: "relative", minWidth: 0 }}>
+            <button className="cmux-provider-btn" onClick={() => setProviderMenu((v) => !v)}>
+              <span className="cmux-provider-dot" />
+              <span className="cmux-provider-current">{activeProvider ? `${activeProvider.label} · ${shortModel(activeProvider.model)}` : "Agent"}</span>
+              <ChevronDownIcon className="cmux-provider-caret" />
+            </button>
+            {providerMenu && (
+              <div className="cmux-provider-menu">
+                {providerOptions.map((p) => (
+                  <button key={p.key} className="cmux-provider-item" onClick={() => chooseProvider(p)}>
+                    <span className="cmux-provider-dot" />
+                    <span className="cmux-provider-name">{p.label}</span>
+                    <span className="cmux-provider-model dim mono">{shortModel(p.model)}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+          <div className="cmux-agent-actions">
+            <button className="cmux-icon-btn" onClick={attachImage} title="Attach image"><ImageIcon /></button>
+            <button className="cmux-icon-btn" onClick={attachFile} title="Attach file"><FileIcon /></button>
+            <button className="cmux-agent-send" onClick={send} disabled={!paneId || busy} title="Send (Enter)"><ArrowUpIcon /></button>
+          </div>
+        </div>
+        <input ref={imageInputRef} type="file" accept="image/*" style={{ display: "none" }} onChange={onImageChosen} />
+        <input ref={fileInputRef} type="file" style={{ display: "none" }} onChange={onFileChosen} />
       </div>
     </div>
   );
+}
+
+function toMsg(m: AgentMessage): Msg {
+  const role = (m.role || "user").toLowerCase();
+  return {
+    id: m.id,
+    threadId: m.threadId,
+    role: role === "assistant" || role === "system" || role === "error" ? role : "user",
+    content: m.content,
+    createdAtUtc: m.createdAtUtc,
+    provider: m.provider,
+    model: m.model,
+    inputTokens: m.inputTokens,
+    outputTokens: m.outputTokens,
+    totalTokens: m.totalTokens,
+  };
+}
+
+function upsertStreamingMessage(messages: Msg[], threadId: string, messageId: string | undefined, delta: string): Msg[] {
+  const id = messageId || `stream-${threadId}`;
+  const idx = messages.findIndex((m) => m.id === id || (m.id === `stream-${threadId}` && m.role === "assistant"));
+  if (idx < 0) return [...messages, { id, threadId, role: "assistant", content: delta || "" }];
+  const current = messages[idx];
+  return [...messages.slice(0, idx), { ...current, id, content: current.content + (delta || "") }, ...messages.slice(idx + 1)];
+}
+
+function buildProviderOptions(settings: any): ProviderOption[] {
+  const opts: ProviderOption[] = [
+    { key: "openai", provider: "openai", label: "Openai", model: settings?.openAi?.model ?? "gpt-4o-mini" },
+    { key: "anthropic", provider: "anthropic", label: "Anthropic", model: settings?.anthropic?.model ?? "claude-3-5-sonnet-latest" },
+    { key: "gemini", provider: "gemini", label: "Gemini", model: settings?.gemini?.model ?? "gemini-2.0-flash" },
+  ];
+  for (const cp of settings?.customProviders ?? []) {
+    opts.push({ key: `custom:${cp.name}`, provider: "custom", customName: cp.name, label: cp.name || "Custom", model: cp.model ?? "" });
+  }
+  return opts;
+}
+
+function updateUsageFromMessages(messages: AgentMessage[], setUsage: (v: string) => void) {
+  const last = [...messages].reverse().find((m) => (m.inputTokens || m.outputTokens || m.totalTokens) > 0);
+  setUsage(last ? `Usage: in ${last.inputTokens} · out ${last.outputTokens} · total ${last.totalTokens}` : "Usage: -");
+}
+
+function messageMatches(m: Msg, query: string) {
+  const q = query.toLowerCase();
+  return `${m.role} ${m.content} ${m.provider ?? ""} ${m.model ?? ""}`.toLowerCase().includes(q);
+}
+
+function messageHeader(m: Msg) {
+  const stamp = m.createdAtUtc ? new Date(m.createdAtUtc).toLocaleString() : new Date().toLocaleString();
+  return `${m.role} · ${stamp}`;
+}
+
+function messageMeta(m: Msg) {
+  const bits: string[] = [];
+  if ((m.totalTokens ?? 0) > 0) bits.push(`tok ${m.totalTokens}`);
+  if ((m.inputTokens ?? 0) > 0 || (m.outputTokens ?? 0) > 0) bits.push(`in ${m.inputTokens ?? 0} / out ${m.outputTokens ?? 0}`);
+  if (m.provider || m.model) bits.push(`${m.provider ?? ""}/${m.model ?? ""}`.replace(/^\/|\/$/g, ""));
+  return bits.join(" · ");
+}
+
+function formatThreadMeta(t: AgentThread) {
+  return `${new Date(t.updatedAtUtc).toLocaleString()} · ${t.messageCount} msg · tok ${t.totalTokens}`;
+}
+
+function shortModel(model: string) {
+  return model.length > 20 ? model.slice(0, 20) + "..." : model;
+}
+
+function appendPath(current: string, path: string) {
+  return current.trim() ? `${current}\n[${path}]` : `[${path}]`;
+}
+
+function SearchIcon({ className }: { className?: string }) {
+  return <svg className={className} width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="7" cy="7" r="4.5" stroke="currentColor" /><path d="M10.5 10.5L14 14" stroke="currentColor" strokeLinecap="round" /></svg>;
+}
+
+function PlusIcon() {
+  return <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 3V13M3 8H13" stroke="currentColor" strokeLinecap="round" /></svg>;
+}
+
+function TrashIcon() {
+  return <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 4H13M6 4V3H10V4M5 6V13H11V6" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" /></svg>;
+}
+
+function RefreshIcon() {
+  return <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M13 5V2.5H10.5M12.6 5A5 5 0 1 0 13 10" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" /></svg>;
+}
+
+function ChevronDownIcon({ className }: { className?: string }) {
+  return <svg className={className} width="10" height="10" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4 6L8 10L12 6" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" /></svg>;
+}
+
+function ImageIcon() {
+  return <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="2.5" y="3" width="11" height="10" rx="1.5" stroke="currentColor" /><circle cx="6" cy="6.5" r="1.2" fill="currentColor" /><path d="M3 12L6.2 9L8.2 10.7L10.4 8.4L13 11.2" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" /></svg>;
+}
+
+function FileIcon() {
+  return <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4 2.5H9.5L12 5V13.5H4V2.5Z" stroke="currentColor" strokeLinejoin="round" /><path d="M9.5 2.5V5H12M6 8H10M6 10.5H10" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" /></svg>;
+}
+
+function ArrowUpIcon() {
+  return <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 13V3M4.5 6.5L8 3L11.5 6.5" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" /></svg>;
 }

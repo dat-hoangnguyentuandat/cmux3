@@ -10,9 +10,11 @@ export function SnippetsPanel({ onClose, onInsert }: Props) {
   const [items, setItems] = useState<Snippet[]>([]);
   const [query, setQuery] = useState("");
   const [editing, setEditing] = useState<Partial<Snippet> | null>(null);
+  const [categories, setCategories] = useState<string[]>([]);
 
   const load = () => api.getSnippets(query).then(setItems);
   useEffect(() => { load(); }, [query]);
+  useEffect(() => { api.getSnippetCategories().then(setCategories).catch(() => setCategories([])); }, []);
 
   const save = async () => {
     if (!editing) return;
@@ -23,52 +25,58 @@ export function SnippetsPanel({ onClose, onInsert }: Props) {
   };
   const remove = async (id: string) => { await api.deleteSnippet(id); await load(); };
   const insert = async (s: Snippet) => { await api.useSnippet(s.id); onInsert?.(s.content); onClose(); };
+  const toggleFav = async (s: Snippet) => {
+    const updated = { ...s, isFavorite: !s.isFavorite };
+    await api.updateSnippet(s.id, updated);
+    await load();
+  };
 
   return (
-    <div className="overlay" onMouseDown={onClose}>
-      <div className="panel wide" onMouseDown={(e) => e.stopPropagation()}>
-        <div className="panel-head">
-          <h2>Snippets</h2>
-          <div className="panel-head-actions">
-            <button onClick={() => setEditing({ name: "", content: "", category: "General", tags: [] })}>New</button>
-            <button className="icon-btn" onClick={onClose}>×</button>
+    <div className="cmux-popup-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="cmux-popup-panel" onMouseDown={(e) => e.stopPropagation()} style={{ maxWidth: 600, maxHeight: 520 }}>
+      <div className="cmux-panel-toolbar">
+        <div className="cmux-panel-toolbar-row">
+          <span className="cmux-panel-title">SNIPPETS</span>
+          <input style={{ flex: 1 }} placeholder="Search snippets..." value={query} onChange={(e) => setQuery(e.target.value)} />
+          <button className="cmux-btn" onClick={() => setEditing({ name: "", content: "", category: "General", tags: [], isFavorite: false } as Partial<Snippet>)}>New</button>
+          <button className="cmux-icon-btn" onClick={onClose}>×</button>
+        </div>
+      </div>
+      {editing ? (
+        <div className="cmux-panel-body">
+          <div className="cmux-settings-grid">
+            <label className="cmux-field"><span>Name</span><input value={editing.name ?? ""} onChange={(e) => setEditing({ ...editing, name: e.target.value })} /></label>
+            <label className="cmux-field"><span>Category</span>
+              <input list="cmux-snip-cats" value={editing.category ?? ""} onChange={(e) => setEditing({ ...editing, category: e.target.value })} />
+              <datalist id="cmux-snip-cats">{categories.map((c) => <option key={c} value={c} />)}</datalist>
+            </label>
+            <label className="cmux-field full"><span>Content</span>
+              <textarea rows={6} value={editing.content ?? ""} onChange={(e) => setEditing({ ...editing, content: e.target.value })} /></label>
+            <label className="cmux-field checkbox"><input type="checkbox" checked={!!editing.isFavorite} onChange={(e) => setEditing({ ...editing, isFavorite: e.target.checked })} /><span>Favorite</span></label>
+          </div>
+          <div className="cmux-modal-actions">
+            <button onClick={() => setEditing(null)}>Cancel</button>
+            <button className="primary" onClick={save}>Save</button>
           </div>
         </div>
-        {editing ? (
-          <div className="panel-body snippet-edit">
-            <label className="field"><span>Name</span>
-              <input value={editing.name ?? ""} onChange={(e) => setEditing({ ...editing, name: e.target.value })} /></label>
-            <label className="field"><span>Category</span>
-              <input value={editing.category ?? ""} onChange={(e) => setEditing({ ...editing, category: e.target.value })} /></label>
-            <label className="field"><span>Content</span>
-              <textarea rows={6} value={editing.content ?? ""} onChange={(e) => setEditing({ ...editing, content: e.target.value })} /></label>
-            <div className="modal-actions">
-              <button onClick={() => setEditing(null)}>Cancel</button>
-              <button className="primary" onClick={save}>Save</button>
+      ) : (
+        <div className="cmux-panel-body">
+          {items.length === 0 && <div className="cmux-empty">No snippets</div>}
+          {items.map((s) => (
+            <div key={s.id} className="cmux-snippet-row">
+              <span className={"cmux-fav" + (s.isFavorite ? " on" : "")} onClick={() => toggleFav(s)} title="Toggle favorite">★</span>
+              <div className="cmux-snippet-info" onClick={() => insert(s)}>
+                <div className="cmux-snippet-name">{s.name} <span className="dim">· {s.category}</span></div>
+                <div className="cmux-snippet-content mono dim">{s.content}</div>
+              </div>
+              <div className="cmux-snippet-actions">
+                <button onClick={() => setEditing(s)}>Edit</button>
+                <button onClick={() => remove(s.id)}>Delete</button>
+              </div>
             </div>
-          </div>
-        ) : (
-          <>
-            <div className="panel-toolbar">
-              <input placeholder="Search snippets..." value={query} onChange={(e) => setQuery(e.target.value)} />
-            </div>
-            <div className="panel-body">
-              {items.length === 0 && <div className="empty">No snippets</div>}
-              {items.map((s) => (
-                <div key={s.id} className="snippet-item">
-                  <div className="snippet-info" onClick={() => insert(s)}>
-                    <div className="snippet-name">{s.name} <span className="dim">· {s.category}</span></div>
-                    <div className="snippet-content mono dim">{s.content}</div>
-                  </div>
-                  <div className="snippet-actions">
-                    <button onClick={() => setEditing(s)}>Edit</button>
-                    <button onClick={() => remove(s.id)}>Delete</button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </>
-        )}
+          ))}
+        </div>
+      )}
       </div>
     </div>
   );

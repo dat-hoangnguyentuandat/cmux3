@@ -13,6 +13,7 @@ interface Props {
   theme?: TerminalTheme;
   fontFamily: string;
   fontSize: number;
+  settings?: any;
   customColors?: { background?: string; foreground?: string; cursor?: string; selection?: string };
   onFocus: (paneId: string) => void;
   onClosePane: (paneId: string) => void;
@@ -20,6 +21,11 @@ interface Props {
   onCwd: (paneId: string, cwd: string) => void;
   onBell?: (paneId: string) => void;
   onNotify?: () => void;
+  onSearchRequest?: () => void;
+  onSplitRight?: () => void;
+  onSplitDown?: () => void;
+  onZoom?: () => void;
+  onCapture?: (paneId: string) => void;
   onSetType: (paneId: string, type: string) => void;
   onRatio: (nodeId: string, ratio: number) => void;
 }
@@ -35,12 +41,19 @@ function PaneBody(props: Props, pane: Pane) {
       theme={props.theme}
       fontFamily={props.fontFamily}
       fontSize={props.fontSize}
+      settings={props.settings}
       customColors={props.customColors}
       onFocusRequest={() => props.onFocus(pane.id)}
       onTitle={(t) => props.onTitle(pane.id, t)}
       onCwd={(c) => props.onCwd(pane.id, c)}
       onBell={() => props.onBell?.(pane.id)}
       onNotify={() => props.onNotify?.()}
+      onSearchRequest={() => props.onSearchRequest?.()}
+      onSplitRight={() => props.onSplitRight?.()}
+      onSplitDown={() => props.onSplitDown?.()}
+      onZoom={() => props.onZoom?.()}
+      onClosePane={() => props.onClosePane(pane.id)}
+      onCapture={() => props.onCapture?.(pane.id)}
     />
   );
 }
@@ -57,20 +70,10 @@ export function SplitView(props: Props) {
         <div className="pane-header">
           <span className="pane-title">{pane.title || pane.workingDirectory || pane.type}</span>
           <div className="pane-tools">
-            <select
-              className="pane-type"
-              value={pane.type}
-              onChange={(e) => props.onSetType(pane.id, e.target.value)}
-              title="Pane type"
-            >
-              <option value="terminal">terminal</option>
-              <option value="web">web</option>
-              <option value="notepad">notepad</option>
-            </select>
             <button className="pane-close" onClick={() => props.onClosePane(pane.id)} title="Close pane">×</button>
           </div>
         </div>
-        <div className="leaf-body">{PaneBody(props, pane)}</div>
+        <div className={"leaf-body" + (pane.type === "terminal" ? " terminal-leaf-body" : "")}>{PaneBody(props, pane)}</div>
       </div>
     );
   }

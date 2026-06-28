@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, type Notification } from "../lib/api";
 
 interface Props {
@@ -17,31 +17,32 @@ export function NotificationsPanel({ onClose, onChanged }: Props) {
   const clear = async () => { await api.clearNotifications(); await load(); onChanged?.(); };
 
   return (
-    <div className="overlay" onMouseDown={onClose}>
-      <div className="panel right" onMouseDown={(e) => e.stopPropagation()}>
-        <div className="panel-head">
-          <h2>Notifications</h2>
-          <div className="panel-head-actions">
-            <button onClick={markAll}>Mark all read</button>
-            <button onClick={clear}>Clear</button>
-            <button className="icon-btn" onClick={onClose}>×</button>
+    <div className="cmux-popup-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="cmux-popup-panel" onMouseDown={(e) => e.stopPropagation()} style={{ maxWidth: 500, maxHeight: 480 }}>
+      <div className="cmux-panel-toolbar">
+        <div className="cmux-panel-toolbar-row">
+          <span className="cmux-panel-title">NOTIFICATIONS</span>
+          <span className="cmux-spacer" />
+          <button className="cmux-btn" onClick={markAll}>Mark all read</button>
+          <button className="cmux-btn" onClick={clear}>Clear</button>
+          <button className="cmux-icon-btn" onClick={onClose}>×</button>
+        </div>
+      </div>
+      <div className="cmux-panel-body" style={{ maxHeight: 400, overflow: "auto" }}>
+        {items.length === 0 && <div className="cmux-empty">No notifications</div>}
+        {items.map((n) => (
+          <div
+            key={n.id}
+            className={"cmux-notif-row" + (n.isRead ? "" : " unread")}
+            onClick={() => markRead(n.id)}
+          >
+            <div className="cmux-notif-title">{n.title}</div>
+            {n.subtitle && <div className="cmux-notif-sub">{n.subtitle}</div>}
+            <div className="cmux-notif-body">{n.body}</div>
+            <div className="cmux-notif-time dim">{new Date(n.timestamp).toLocaleString()}</div>
           </div>
-        </div>
-        <div className="panel-body">
-          {items.length === 0 && <div className="empty">No notifications</div>}
-          {items.map((n) => (
-            <div
-              key={n.id}
-              className={"notif" + (n.isRead ? "" : " unread")}
-              onClick={() => markRead(n.id)}
-            >
-              <div className="notif-title">{n.title}</div>
-              {n.subtitle && <div className="notif-sub">{n.subtitle}</div>}
-              <div className="notif-body">{n.body}</div>
-              <div className="notif-time">{new Date(n.timestamp).toLocaleString()}</div>
-            </div>
-          ))}
-        </div>
+        ))}
+      </div>
       </div>
     </div>
   );
