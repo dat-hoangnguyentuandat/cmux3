@@ -37,6 +37,13 @@ public class CmuxSettings
     // Knowledge Graph: auto-index repos (.gitnexus) + per-pane mini graph overlay.
     public bool KnowledgeGraphEnabled { get; set; } = false;
 
+    // ── Input ──────────────────────────────────────────────────
+    // Vietnamese typing on Windows is handled by the OS TSF IME (Unikey /
+    // EVKey / GoTiengViet) and xterm.js's textarea surfaces the precomposed
+    // rune via onData; the server forwards bytes verbatim into the ConPTY.
+    // No app-side composer is needed — the host does the work, the same way
+    // cmux2 (WPF) does it.
+
     // ── Behavior ────────────────────────────────────────────────
 
     public bool RestoreSessionOnStartup { get; set; } = true;

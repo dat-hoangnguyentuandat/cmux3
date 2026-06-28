@@ -51,6 +51,9 @@ internal static class Program
             case "cli":
                 ServerManager.EnsureRunning();
                 return InteractiveCli.Run();
+            case "codex":
+                ServerManager.EnsureRunning();
+                return CodexLauncher.Open(args.Skip(1).ToArray());
             case "-v":
             case "--version":
             case "version":
@@ -68,7 +71,7 @@ internal static class Program
         }
     }
 
-    private static void PrintHelp()
+    internal static void PrintHelp()
     {
         Console.WriteLine("""
             cmux3 - terminal workspace launcher
@@ -80,7 +83,9 @@ internal static class Program
               cmux3 stop         Stop the background host
               cmux3 status       Show whether the host is running
               cmux3 cli          Open the interactive CLI
+              cmux3 codex [args] Open a cmux3 web terminal running `codex`
               cmux3 version      Print version
             """);
     }
 }
+

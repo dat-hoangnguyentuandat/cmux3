@@ -28,6 +28,14 @@ internal sealed class Menu
 
     internal int Run()
     {
+        // No interactive console (redirected stdin/stdout): cannot show the menu.
+        // Fall back to printing help so the process does not crash with an unhandled exception.
+        if (Console.IsInputRedirected || Console.IsOutputRedirected)
+        {
+            Program.PrintHelp();
+            return 0;
+        }
+
         // Probe the server once up front; it is cached afterwards so moving
         // through the menu stays instant (the TCP probe can block for ~500ms).
         _serverRunning = ServerManager.IsRunning();
@@ -82,12 +90,20 @@ internal sealed class Menu
         }
     }
 
+
+    /// <summary>Console.Clear throws on redirected/headless handles (e.g. when cmux3 is
+    /// launched from a tool that captures stdout). Swallow that so the menu still runs.</summary>
+    private static void SafeClear()
+    {
+        try { Console.Clear(); }
+        catch (IOException) { }
+    }
     private bool _dirty;
 
     /// <summary>Runs an action, then refreshes the cached server state once.</summary>
     private bool Invoke(int index)
     {
-        Console.Clear();
+        SafeClear();
         var keepRunning = _items[index].Action();
         _serverRunning = ServerManager.IsRunning();
         _dirty = true;
@@ -97,7 +113,7 @@ internal sealed class Menu
     private void Render()
     {
         _dirty = false;
-        Console.Clear();
+        SafeClear();
         var running = _serverRunning;
         var serverState = running ? "running" : "stopped";
 
@@ -237,3 +253,5 @@ internal sealed class Menu
         Console.ReadKey(intercept: true);
     }
 }
+
+

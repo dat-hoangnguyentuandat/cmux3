@@ -2,52 +2,79 @@ import { useEffect, useState } from "react";
 import { api, type QuotaSnapshot } from "../lib/api";
 
 const WINDOW_LABELS: Record<string, string> = {
-  Last5Hours: "Last 5 Hours",
+  Last5Hours: "Last 5 hours",
   Today: "Today",
-  Last7Days: "Last 7 Days",
-  Last30Days: "Last 30 Days",
-  AllTime: "All Time",
+  Last7Days: "Last 7 days",
+  Last30Days: "Last 30 days",
+  AllTime: "All time",
 };
 
 export function QuotaPanel({ onClose }: { onClose: () => void }) {
   const [snap, setSnap] = useState<QuotaSnapshot | null>(null);
   const [window, setWindow] = useState("Today");
 
-  useEffect(() => { api.getQuota().then(setSnap); }, []);
+  const load = () => api.getQuota().then(setSnap);
+  useEffect(() => { load(); }, []);
 
   const windows = snap ? Object.keys(snap.windows) : [];
   const data = snap?.windows[window];
+  const totals = data?.rows.reduce((acc, r) => ({
+    requests: acc.requests + r.requests,
+    input: acc.input + r.inputTokens,
+    output: acc.output + r.outputTokens,
+    total: acc.total + r.totalTokens,
+  }), { requests: 0, input: 0, output: 0, total: 0 }) ?? { requests: 0, input: 0, output: 0, total: 0 };
 
   return (
-    <div className="overlay" onMouseDown={onClose}>
-      <div className="panel wide" onMouseDown={(e) => e.stopPropagation()}>
-        <div className="panel-head">
-          <h2>Agent Quota</h2>
-          <button className="icon-btn" onClick={onClose}>×</button>
-        </div>
-        <div className="panel-toolbar">
+    <div className="cmux-panel">
+      <div className="cmux-panel-toolbar">
+        <div className="cmux-panel-toolbar-row">
+          <label>Window</label>
           <select value={window} onChange={(e) => setWindow(e.target.value)}>
             {windows.map((w) => <option key={w} value={w}>{WINDOW_LABELS[w] ?? w}</option>)}
           </select>
-          {data && <span className="dim">{data.requests} requests · {data.totalTokens.toLocaleString()} tokens</span>}
+          <button className="cmux-btn" onClick={load}>Refresh</button>
+          <span className="cmux-spacer" />
         </div>
-        <div className="panel-body">
-          <table className="log-table">
-            <thead>
-              <tr><th>Provider</th><th>Model</th><th>Requests</th><th>Input</th><th>Output</th><th>Total</th><th>Last</th></tr>
-            </thead>
-            <tbody>
-              {(data?.rows ?? []).map((r, i) => (
-                <tr key={i}>
-                  <td>{r.provider}</td><td>{r.model}</td><td>{r.requests}</td>
-                  <td>{r.inputTokens.toLocaleString()}</td><td>{r.outputTokens.toLocaleString()}</td>
-                  <td>{r.totalTokens.toLocaleString()}</td><td className="dim">{r.lastActivityLocal}</td>
-                </tr>
-              ))}
-              {(!data || data.rows.length === 0) && <tr><td colSpan={7} className="empty">No agent activity</td></tr>}
-            </tbody>
-          </table>
+      </div>
+      <div className="cmux-panel-body cmux-quota-body">
+        <div className="cmux-quota-summary">
+          <div><div className="cmux-stat-label">Requests</div><div className="cmux-stat">{totals.requests.toLocaleString()}</div></div>
+          <div><div className="cmux-stat-label">Input Tokens</div><div className="cmux-stat">{totals.input.toLocaleString()}</div></div>
+          <div><div className="cmux-stat-label">Output Tokens</div><div className="cmux-stat">{totals.output.toLocaleString()}</div></div>
+          <div><div className="cmux-stat-label">Total Tokens</div><div className="cmux-stat accent">{totals.total.toLocaleString()}</div></div>
         </div>
+        <table className="cmux-grid">
+          <thead>
+            <tr>
+              <th style={{ width: 140 }}>Provider</th>
+              <th>Model</th>
+              <th style={{ width: 90 }}>Requests</th>
+              <th style={{ width: 100 }}>Input</th>
+              <th style={{ width: 100 }}>Output</th>
+              <th style={{ width: 100 }}>Total</th>
+              <th style={{ width: 160 }}>Last activity</th>
+            </tr>
+          </thead>
+          <tbody>
+            {(data?.rows ?? []).map((r, i) => (
+              <tr key={i}>
+                <td>{r.provider}</td>
+                <td className="mono">{r.model}</td>
+                <td>{r.requests.toLocaleString()}</td>
+                <td>{r.inputTokens.toLocaleString()}</td>
+                <td>{r.outputTokens.toLocaleString()}</td>
+                <td>{r.totalTokens.toLocaleString()}</td>
+                <td className="dim">{r.lastActivityLocal}</td>
+              </tr>
+            ))}
+            {(!data || data.rows.length === 0) && <tr><td colSpan={7} className="cmux-empty">No agent activity</td></tr>}
+          </tbody>
+        </table>
+      </div>
+      <div className="cmux-panel-footer">
+        <span className="dim">{snap ? `Generated ${new Date(snap.generatedAtUtc).toLocaleString()}` : "Loading…"}</span>
+        <span className="cmux-spacer" />
       </div>
     </div>
   );

@@ -1,45 +1,73 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { api, type AppState, type Surface, type TerminalTheme, type Workspace } from "./lib/api";
-import { terminalBus } from "./lib/terminalBus";
-import { SplitView } from "./components/SplitView";
-import { CommandPalette, type Command } from "./components/CommandPalette";
-import { SettingsModal } from "./components/SettingsModal";
-import { NotificationsPanel } from "./components/NotificationsPanel";
-import { CommandLogsPanel } from "./components/CommandLogsPanel";
-import { SessionVaultPanel } from "./components/SessionVaultPanel";
-import { SnippetsPanel } from "./components/SnippetsPanel";
-import { QuotaPanel } from "./components/QuotaPanel";
-import { HistoryPicker } from "./components/HistoryPicker";
-import { AgentsPanel } from "./components/AgentsPanel";
-import { WorkspaceSettingsPanel } from "./components/WorkspaceSettingsPanel";
-import { SearchOverlay } from "./components/SearchOverlay";
-import { TemplatesPanel } from "./components/TemplatesPanel";
-import { SourceTreePanel } from "./components/SourceTreePanel";
-import { KnowledgeGraphPanel } from "./components/KnowledgeGraphPanel";
-import { TrexRunner } from "./components/TrexRunner";
-import { QuickOpen } from "./components/QuickOpen";
-import { AgentChatPanel } from "./components/AgentChatPanel";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { DockLayout, DOCK_LAYOUT_STORAGE_KEY, DOCK_PANELS, type PanelId } from "./components/DockLayout";
 import { AgentSettingsPanel } from "./components/AgentSettingsPanel";
+import { CommandPalette } from "./components/CommandPalette";
+import { HistoryPicker } from "./components/HistoryPicker";
+import { KnowledgeGraphPanel } from "./components/KnowledgeGraphPanel";
+import { NotificationsPanel } from "./components/NotificationsPanel";
+import { SettingsModal } from "./components/SettingsModal";
+import { SnippetsPanel } from "./components/SnippetsPanel";
+import { TemplatesPanel } from "./components/TemplatesPanel";
+import { QuickOpen } from "./components/QuickOpen";
+import { TrexRunner } from "./components/TrexRunner";
+import { api } from "./lib/api";
+import { terminalBus } from "./lib/terminalBus";
+import type { AppState, Surface, TerminalTheme, Workspace } from "./lib/api";
+import "./styles.css";
 
-type Overlay = null | "palette" | "settings" | "notifications" | "logs" | "vault" | "snippets" | "quota" | "history" | "agents" | "wsSettings" | "templates" | "tree" | "kg" | "trex" | "quickOpen" | "agentChat" | "agentSettings";
+type Overlay = "settings" | "notifications" | "snippets" | "history" | "templates" | "kg" | "trex" | "palette" | "quickOpen" | null;
+
+function readSavedDockPanelIds(): string[] | null {
+  try {
+    const raw = window.localStorage.getItem(DOCK_LAYOUT_STORAGE_KEY);
+    if (!raw) return null;
+    const layout = JSON.parse(raw);
+    const panels = layout?.panels;
+    if (Array.isArray(panels)) {
+      return panels.map((p: any) => p.id).filter(Boolean);
+    }
+    if (panels && typeof panels === "object") {
+      return Object.keys(panels);
+    }
+    const gridPanels = layout?.grid?.root?.children?.flatMap((c: any) => c?.panels ?? []) ?? [];
+    return gridPanels.map((p: any) => p.id).filter(Boolean);
+  } catch { return null; }
+}
+
+function initialActivePanels(): PanelId[] {
+  const savedPanels = readSavedDockPanelIds();
+  if (!savedPanels) return ["sidebar"];
+  const known = new Set(DOCK_PANELS.map((p) => p.id));
+  return savedPanels.filter((id): id is PanelId => known.has(id as PanelId));
+}
 
 export default function App() {
   const [state, setState] = useState<AppState | null>(null);
   const [themes, setThemes] = useState<TerminalTheme[]>([]);
   const [settings, setSettings] = useState<any>(null);
   const [overlay, setOverlay] = useState<Overlay>(null);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [activePanels, setActivePanels] = useState<PanelId[]>(initialActivePanels);
+  const sidebarOpen = activePanels.includes("sidebar");
+  const toggleSidebar = useCallback(() => {
+    setActivePanels((p) => p.includes("sidebar") ? p.filter((x) => x !== "sidebar") : [...p, "sidebar"]);
+  }, []);
   const [unread, setUnread] = useState(0);
   const [searchOpen, setSearchOpen] = useState(false);
+  const [searchTerm, setSearchTerm] = useState("");
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const [zoomedPaneId, setZoomedPaneId] = useState<string | null>(null);
   const [broadcast, setBroadcast] = useState(false);
+  const [openMenu, setOpenMenu] = useState<string | null>(null);
+  const [surfaceMenu, setSurfaceMenu] = useState<{ x: number; y: number; surface: Surface } | null>(null);
+  const [shells, setShells] = useState<{ name: string; path: string }[]>([]);
+  const [shellMenuOpen, setShellMenuOpen] = useState(false);
   const [wsStatus, setWsStatus] = useState<Record<string, { branch?: string; workingDirectory?: string; unread: number }>>({});
 
   const refresh = useCallback(async () => setState(await api.getState()), []);
   const refreshUnread = useCallback(() => {
     api.getNotifications().then((r) => setUnread(r.unread)).catch(() => {});
     api.getWorkspaceStatus().then((rows) => {
-      const map: Record<string, { branch?: string; workingDirectory?: string; unread: number }> = {};
+      const map: Record<string, any> = {};
       for (const r of rows) map[r.id] = { branch: r.branch, workingDirectory: r.workingDirectory, unread: r.unread };
       setWsStatus(map);
     }).catch(() => {});
@@ -49,16 +77,15 @@ export default function App() {
     api.getNotifications().then((r) => {
       setUnread(r.unread);
       const latest = r.items.find((n) => !n.isRead);
-      if (latest && "Notification" in window && Notification.permission === "granted") {
-        try { new Notification(latest.title, { body: latest.body }); } catch { /* ignore */ }
-      }
     }).catch(() => {});
   }, []);
 
   useEffect(() => {
-    refresh();
-    api.getThemes().then(setThemes);
-    api.getSettings().then(setSettings);
+    refresh().then(() => {
+      api.getThemes().then(setThemes).catch(() => {});
+      api.getSettings().then((s) => { setSettings(s); document.documentElement.setAttribute("data-ui-theme", s?.uiThemeName ?? "Dark"); }).catch(() => {});
+    });
+    api.getShells().then(setShells).catch(() => setShells([]));
     refreshUnread();
     if ("Notification" in window && Notification.permission === "default")
       Notification.requestPermission().catch(() => {});
@@ -67,459 +94,477 @@ export default function App() {
   }, [refresh, refreshUnread]);
 
   const workspace = useMemo<Workspace | undefined>(
-    () => state?.workspaces.find((w) => w.id === state.selectedWorkspaceId) ?? state?.workspaces[0],
-    [state]
-  );
+    () => state?.workspaces.find((w) => w.id === state.selectedWorkspaceId) ?? state?.workspaces[0], [state]);
   const surface = useMemo<Surface | undefined>(
-    () => workspace?.surfaces.find((s) => s.id === workspace.selectedSurfaceId) ?? workspace?.surfaces[0],
-    [workspace]
-  );
+    () => workspace?.surfaces.find((s) => s.id === workspace.selectedSurfaceId) ?? workspace?.surfaces[0], [workspace]);
 
-  const activeTheme = useMemo(
-    () => themes.find((t) => t.name === settings?.themeName) ?? themes[0],
-    [themes, settings]
-  );
+  const activeTheme = useMemo(() => themes.find((t) => t.name === settings?.themeName), [themes, settings?.themeName]);
   const fontFamily = settings?.fontFamily ?? "Cascadia Code";
   const fontSize = settings?.fontSize ?? 14;
-  const customColors = settings?.useCustomTerminalColors
-    ? {
-        background: settings?.customTerminalBackground,
-        foreground: settings?.customTerminalForeground,
-        cursor: settings?.customTerminalCursor,
-        selection: settings?.customTerminalSelection,
-      }
-    : undefined;
+  const customColors = useMemo(() => settings?.useCustomTerminalColors ? {
+    background: settings?.customTerminalBackground, foreground: settings?.customTerminalForeground,
+    cursor: settings?.customTerminalCursor, selection: settings?.customTerminalSelection,
+  } : undefined, [settings]);
+  const focusedPaneId = surface?.focusedPaneId ?? Object.keys(surface?.panes ?? {})[0];
+  const paneCount = useMemo(() => {
+    const countLeaves = (node: any): number => {
+      if (!node) return 0;
+      if (node.isLeaf) return node.paneId ? 1 : 0;
+      return countLeaves(node.first) + countLeaves(node.second);
+    };
+    return countLeaves(surface?.root);
+  }, [surface?.root]);
+  const canArrangePanes = paneCount > 1;
+  const focusedCwd = useMemo(() => {
+    if (!focusedPaneId || !surface) return workspace?.workingDirectory ?? "";
+    return surface.panes[focusedPaneId]?.workingDirectory || workspace?.workingDirectory || "";
+  }, [focusedPaneId, surface, workspace]);
 
-  const focusedPaneId = surface?.focusedPaneId ?? (surface ? Object.keys(surface.panes)[0] : undefined);
-  const focusedCwd = (focusedPaneId && surface?.panes[focusedPaneId]?.workingDirectory) || workspace?.workingDirectory || "";
+  const selectWorkspace = useCallback(async (id: string) => { await api.selectWorkspace(id); await refresh(); }, [refresh]);
+  const selectSurface = useCallback(async (sId: string) => {
+    if (!workspace) return; await api.selectSurface(workspace.id, sId); await refresh();
+  }, [workspace, refresh]);
+  const closeWorkspace = useCallback(async (id: string) => { await api.deleteWorkspace(id); await refresh(); }, [refresh]);
+  const closeSurface = useCallback(async (sId: string) => {
+    if (!workspace) return; await api.deleteSurface(workspace.id, sId); await refresh();
+  }, [workspace, refresh]);
+  const newWorkspace = useCallback(async () => { await api.createWorkspace("Workspace"); await refresh(); }, [refresh]);
+  const newSurface = useCallback(async () => {
+    if (!workspace) return; await api.createSurface(workspace.id); await refresh();
+  }, [workspace, refresh]);
 
-  useEffect(() => { terminalBus.setBroadcast(broadcast); }, [broadcast]);
-
+  // Auto-create first surface if workspace exists but has none.
+  const autoCreatedRef = useRef(false);
   useEffect(() => {
-    const name = settings?.uiThemeName ?? "Dark+";
-    document.documentElement.setAttribute("data-ui-theme", name);
-  }, [settings]);
+    if (workspace && workspace.surfaces.length === 0 && !autoCreatedRef.current) {
+      autoCreatedRef.current = true;
+      newSurface();
+    }
+  }, [workspace?.id, workspace?.surfaces.length, newSurface]);
 
-  // ── Actions ──────────────────────────────────────────────────────
-  const newWorkspace = useCallback(async () => {
-    const name = prompt("Workspace name", "Workspace");
-    if (name === null) return;
-    await api.createWorkspace(name || "Workspace");
-    await refresh();
-  }, [refresh]);
+  const openWithShell = useCallback(async (shellPath?: string) => {
+    if (!workspace) return;
+    if (workspace.surfaces.length === 0) {
+      await api.createSurface(workspace.id, undefined, shellPath, "terminal");
+      await refresh();
+    } else {
+      const sid = surface?.id ?? workspace.surfaces[0].id;
+      const paneId = focusedPaneId && surface?.panes[focusedPaneId]
+        ? focusedPaneId
+        : Object.keys(surface?.panes ?? {})[0];
+      if (!paneId) return;
+      await api.split(workspace.id, sid, paneId, "vertical", shellPath, "terminal");
+      await refresh();
+    }
+  }, [workspace, surface, focusedPaneId, refresh]);
 
-  const selectWorkspace = useCallback(async (id: string) => {
-    await api.selectWorkspace(id);
-    await refresh();
-  }, [refresh]);
-
-  const selectWorkspaceByIndex = useCallback((idx: number) => {
-    const ws = state?.workspaces[idx];
-    if (ws) selectWorkspace(ws.id);
-  }, [state, selectWorkspace]);
-
-  const closeWorkspace = useCallback(async (id: string) => {
-    if (!confirm("Close this workspace and all its terminals?")) return;
-    await api.deleteWorkspace(id);
-    await refresh();
-  }, [refresh]);
+  const openBrowserPane = useCallback(async () => {
+    if (!workspace) return;
+    if (workspace.surfaces.length === 0) {
+      await api.createSurface(workspace.id, undefined, undefined, "web", "https://www.google.com/webhp?igu=1");
+      await refresh();
+    } else {
+      const sid = surface?.id ?? workspace.surfaces[0].id;
+      const paneId = focusedPaneId && surface?.panes[focusedPaneId]
+        ? focusedPaneId
+        : Object.keys(surface?.panes ?? {})[0];
+      if (!paneId) return;
+      await api.split(workspace.id, sid, paneId, "vertical", undefined, "web", "https://www.google.com/webhp?igu=1");
+      await refresh();
+    }
+  }, [workspace, surface, focusedPaneId, refresh]);
 
   const renameWorkspace = useCallback(async () => {
     if (!workspace) return;
     const name = prompt("Rename workspace", workspace.name);
-    if (name) { await api.updateWorkspace(workspace.id, { name }); await refresh(); }
+    if (!name) return;
+    await api.updateWorkspace(workspace.id, { name }).catch(() => {});
+    refresh();
   }, [workspace, refresh]);
 
-  const newSurface = useCallback(async () => {
+  const renameSurface = useCallback(async (s: Surface) => {
+    const name = prompt("Rename surface", s.name);
+    if (!name || !workspace) return;
+    await api.renameSurface(workspace.id, s.id, name).catch(() => {});
+    refresh();
+  }, [workspace, refresh]);
+
+  const duplicateSurface = useCallback(async (s: Surface) => {
     if (!workspace) return;
-    await api.createSurface(workspace.id);
+    const ns = await api.createSurface(workspace.id);
+    const state2 = await api.getState();
+    const newSurface = state2?.workspaces.find((w) => w.id === workspace.id)?.surfaces.find((x) => x.id === ns.id);
+    if (!newSurface) return;
+    for (const pane of Object.values(s.panes)) {
+      await api.split(workspace.id, ns.id, Object.keys(s.panes)[0] ?? ns.id, "vertical",
+        (pane as any).shellPath, pane.type as any, (pane as any).url);
+    }
     await refresh();
   }, [workspace, refresh]);
 
-  const selectSurface = useCallback(async (sId: string) => {
+  const closeOtherSurfaces = useCallback(async (sId: string) => {
     if (!workspace) return;
-    await api.selectSurface(workspace.id, sId);
+    for (const s of workspace.surfaces) {
+      if (s.id !== sId) await api.deleteSurface(workspace.id, s.id);
+    }
     await refresh();
   }, [workspace, refresh]);
-
-  const cycleSurface = useCallback((dir: 1 | -1) => {
-    if (!workspace || !surface) return;
-    const list = workspace.surfaces;
-    const i = list.findIndex((s) => s.id === surface.id);
-    const next = list[(i + dir + list.length) % list.length];
-    if (next && next.id !== surface.id) selectSurface(next.id);
-  }, [workspace, surface, selectSurface]);
-
-  const closeSurface = useCallback(async (sId: string) => {
-    if (!workspace) return;
-    await api.deleteSurface(workspace.id, sId);
-    await refresh();
-  }, [workspace, refresh]);
-
-  const splitPane = useCallback(async (dir: "vertical" | "horizontal") => {
-    if (!workspace || !surface) return;
-    const paneId = surface.focusedPaneId ?? Object.keys(surface.panes)[0];
-    if (!paneId) return;
-    await api.split(workspace.id, surface.id, paneId, dir);
-    await refresh();
-  }, [workspace, surface, refresh]);
-
-  const closePane = useCallback(async (paneId: string) => {
-    if (!workspace || !surface) return;
-    await api.closePane(workspace.id, surface.id, paneId);
-    await refresh();
-  }, [workspace, surface, refresh]);
 
   const focusPane = useCallback(async (paneId: string) => {
-    if (!workspace || !surface || surface.focusedPaneId === paneId) return;
     setState((prev) => {
       if (!prev) return prev;
       const next = structuredClone(prev) as AppState;
-      const w = next.workspaces.find((x) => x.id === workspace.id);
-      const s = w?.surfaces.find((x) => x.id === surface.id);
-      if (s) s.focusedPaneId = paneId;
-      return next;
+      for (const w of next.workspaces) for (const s of w.surfaces) {
+        if (s.panes[paneId]) { s.focusedPaneId = paneId; w.selectedSurfaceId = s.id; return next; }
+      }
+      return prev;
     });
-    api.focusPane(workspace.id, surface.id, paneId).catch(() => {});
+    if (workspace && surface) {
+      api.focusPane(workspace.id, surface.id, paneId).catch(() => {});
+    }
   }, [workspace, surface]);
 
-  const setRatio = useCallback((nodeId: string, ratio: number) => {
-    if (!workspace || !surface) return;
-    setState((prev) => {
-      if (!prev) return prev;
-      const next = structuredClone(prev) as AppState;
-      const w = next.workspaces.find((x) => x.id === workspace.id);
-      const s = w?.surfaces.find((x) => x.id === surface.id);
-      const apply = (n: any): boolean => {
-        if (n.id === nodeId) { n.splitRatio = ratio; return true; }
-        if (n.isLeaf) return false;
-        return apply(n.first) || apply(n.second);
-      };
-      if (s) apply(s.root);
-      return next;
-    });
-    api.setRatio(workspace.id, surface.id, nodeId, ratio).catch(() => {});
-  }, [workspace, surface]);
+  const closePane = useCallback(async (paneId: string) => {
+    if (!workspace) return;
+    for (const s of workspace.surfaces) {
+      if (s.panes[paneId]) { await api.closePane(workspace.id, s.id, paneId); break; }
+    }
+    await refresh();
+  }, [workspace, refresh]);
 
   const setPaneTitle = useCallback((paneId: string, title: string) => {
     setState((prev) => {
       if (!prev) return prev;
       const next = structuredClone(prev) as AppState;
-      for (const w of next.workspaces)
-        for (const s of w.surfaces)
-          if (s.panes[paneId]) s.panes[paneId].title = title;
-      return next;
+      for (const w of next.workspaces) for (const s of w.surfaces)
+        if (s.panes[paneId]) { s.panes[paneId].title = title; return next; }
+      return prev;
     });
   }, []);
-
   const setPaneCwd = useCallback((paneId: string, cwd: string) => {
     setState((prev) => {
       if (!prev) return prev;
       const next = structuredClone(prev) as AppState;
-      for (const w of next.workspaces)
-        for (const s of w.surfaces)
-          if (s.panes[paneId]) s.panes[paneId].workingDirectory = cwd;
-      return next;
+      for (const w of next.workspaces) for (const s of w.surfaces)
+        if (s.panes[paneId]) { s.panes[paneId].workingDirectory = cwd; return next; }
+      return prev;
     });
   }, []);
-
-  const setPaneType = useCallback(async (paneId: string, type: string) => {
-    if (!workspace || !surface) return;
+  const setPaneType = useCallback((paneId: string, type: string) => {
     setState((prev) => {
       if (!prev) return prev;
       const next = structuredClone(prev) as AppState;
-      for (const w of next.workspaces)
-        for (const s of w.surfaces)
-          if (s.panes[paneId]) s.panes[paneId].type = type as any;
-      return next;
+      for (const w of next.workspaces) for (const s of w.surfaces)
+        if (s.panes[paneId]) { s.panes[paneId].type = type as any; return next; }
+      return prev;
     });
-    await api.updatePane(workspace.id, surface.id, paneId, { type }).catch(() => {});
+  }, []);
+  const setRatio = useCallback((nodeId: string, ratio: number) => {
+    if (!workspace || !surface) return;
+    api.setRatio(workspace.id, surface.id, nodeId, ratio).catch(() => {});
+    setState((prev) => {
+      if (!prev) return prev;
+      const next = structuredClone(prev) as AppState;
+      for (const w of next.workspaces) for (const s of w.surfaces) {
+        if (s.id === surface?.id) {
+          const updateNode = (n: any): any => {
+            if (!n) return n;
+            if (n.id === nodeId) return { ...n, splitRatio: ratio };
+            if (!n.isLeaf) return { ...n, first: updateNode(n.first), second: updateNode(n.second) };
+            return n;
+          };
+          s.root = updateNode(s.root);
+          return next;
+        }
+      }
+      return prev;
+    });
   }, [workspace, surface]);
-
-  const insertIntoFocused = useCallback((text: string) => {
-    terminalBus.write(focusedPaneId, text);
-  }, [focusedPaneId]);
-
-  const orderedPaneIds = useMemo(() => {
-    if (!surface) return [] as string[];
-    const out: string[] = [];
-    const walk = (n: any) => {
-      if (!n) return;
-      if (n.isLeaf) { if (n.paneId) out.push(n.paneId); return; }
-      walk(n.first); walk(n.second);
-    };
-    walk(surface.root);
-    return out;
-  }, [surface]);
-
-  const focusAdjacent = useCallback((dir: 1 | -1) => {
-    if (orderedPaneIds.length < 2) return;
-    const cur = focusedPaneId ?? orderedPaneIds[0];
-    const i = Math.max(0, orderedPaneIds.indexOf(cur));
-    const next = orderedPaneIds[(i + dir + orderedPaneIds.length) % orderedPaneIds.length];
-    focusPane(next);
-  }, [orderedPaneIds, focusedPaneId, focusPane]);
-
   const toggleZoom = useCallback(() => {
     if (!focusedPaneId) return;
     setZoomedPaneId((z) => (z === focusedPaneId ? null : focusedPaneId));
   }, [focusedPaneId]);
+  const equalizeSurface = useCallback(async () => {
+    if (!workspace || !surface) return;
+    const nodes: string[] = [];
+    const walk = (node: any) => { if (!node || node.isLeaf) return; nodes.push(node.id); walk(node.first); walk(node.second); };
+    walk(surface.root);
+    await Promise.all(nodes.map((nodeId) => api.setRatio(workspace.id, surface.id, nodeId, 0.5).catch(() => {})));
+    await refresh();
+  }, [workspace, surface, refresh]);
+  const applyLayout = useCallback(async (cols: number, rows: number) => {
+    if (!workspace || !surface) return;
+    let current = surface;
+    const leaves = (root: any) => {
+      const ids: string[] = [];
+      const walk = (node: any) => {
+        if (!node) return;
+        if (node.isLeaf) { if (node.paneId) ids.push(node.paneId); return; }
+        walk(node.first); walk(node.second);
+      };
+      walk(root);
+      return ids;
+    };
+    const paneIds = leaves(current.root);
+    const keepPaneId = focusedPaneId && paneIds.includes(focusedPaneId) ? focusedPaneId : paneIds[0];
+    if (!keepPaneId) return;
+    setZoomedPaneId(null);
+    await api.focusPane(workspace.id, current.id, keepPaneId).catch(() => {});
+    for (const paneId of paneIds) {
+      if (paneId !== keepPaneId) current = await api.closePane(workspace.id, current.id, paneId);
+    }
+    let columnPaneIds = [keepPaneId];
+    for (let c = 1; c < cols; c++) {
+      current = await api.split(workspace.id, current.id, columnPaneIds[columnPaneIds.length - 1], "vertical");
+      columnPaneIds = leaves(current.root);
+    }
+    if (rows > 1) {
+      for (const paneId of [...columnPaneIds]) {
+        await api.focusPane(workspace.id, current.id, paneId).catch(() => {});
+        let targetPaneId = paneId;
+        for (let r = 1; r < rows; r++) {
+          current = await api.split(workspace.id, current.id, targetPaneId, "horizontal");
+          targetPaneId = current.focusedPaneId ?? targetPaneId;
+        }
+      }
+    }
+    const nodes: string[] = [];
+    const collectNodes = (node: any) => { if (!node || node.isLeaf) return; nodes.push(node.id); collectNodes(node.first); collectNodes(node.second); };
+    collectNodes(current.root);
+    await Promise.all(nodes.map((nodeId) => api.setRatio(workspace.id, current.id, nodeId, 0.5).catch(() => {})));
+    await refresh();
+  }, [workspace, surface, focusedPaneId, refresh]);
+  const applyMainStackLayout = useCallback(async () => {
+    if (!workspace || !surface) return;
+    await applyLayout(2, 1);
+    const stateAfterColumns = await api.getState();
+    const ws = stateAfterColumns.workspaces.find((w) => w.id === workspace.id);
+    const current = ws?.surfaces.find((s) => s.id === surface.id);
+    if (!current) return;
+    const ids: string[] = [];
+    const walk = (node: any) => { if (!node) return; if (node.isLeaf) { if (node.paneId) ids.push(node.paneId); return; } walk(node.first); walk(node.second); };
+    walk(current.root);
+    const rightPaneId = ids[1];
+    if (rightPaneId) {
+      await api.focusPane(workspace.id, current.id, rightPaneId).catch(() => {});
+      const updated = await api.split(workspace.id, current.id, rightPaneId, "horizontal").catch(() => null);
+      const nodes: string[] = [];
+      const collectNodes = (node: any) => { if (!node || node.isLeaf) return; nodes.push(node.id); collectNodes(node.first); collectNodes(node.second); };
+      collectNodes(updated?.root);
+      await Promise.all(nodes.map((nodeId) => api.setRatio(workspace.id, current.id, nodeId, 0.5).catch(() => {})));
+      await refresh();
+    }
+  }, [workspace, surface, applyLayout, refresh]);
+  const insertIntoFocused = useCallback((text: string) => {
+    terminalBus.write(focusedPaneId, text);
+  }, [focusedPaneId]);
+  const openPanel = useCallback((id: PanelId) => { setActivePanels((p) => (p.includes(id) ? p : [...p, id])); }, []);
+  const closePanel = useCallback((id: PanelId) => { setActivePanels((p) => p.filter((x) => x !== id)); }, []);
+  const selectWorkspaceByIndex = useCallback(async (n: number) => {
+    const ws = state?.workspaces[n]; if (ws) await selectWorkspace(ws.id);
+  }, [state, selectWorkspace]);
+  const cycleSurface = useCallback(async (dir: number) => {
+    if (!workspace) return; const idx = workspace.surfaces.findIndex((s) => s.id === surface?.id);
+    const next = (idx + dir + workspace.surfaces.length) % workspace.surfaces.length;
+    await selectSurface(workspace.surfaces[next].id);
+  }, [workspace, surface, selectSurface]);
+  const focusAdjacent = useCallback(async (dir: number) => {
+    if (!surface) return;
+    const ids: string[] = []; const walk = (n: any) => { if (!n) return; if (n.isLeaf) { if (n.paneId) ids.push(n.paneId); return; } walk(n.first); walk(n.second); };
+    walk(surface.root); const idx = ids.indexOf(focusedPaneId ?? "");
+    if (idx >= 0 && ids.length > 1) { const next = (idx + dir + ids.length) % ids.length; await focusPane(ids[next]); }
+  }, [surface, focusedPaneId, focusPane]);
 
-  // ── Keyboard shortcuts ───────────────────────────────────────────
+  const splitPane = useCallback((dir: "vertical" | "horizontal") => {
+    if (!workspace || !surface || !focusedPaneId) return;
+    api.split(workspace.id, surface.id, focusedPaneId, dir).then(() => refresh()).catch(() => {});
+  }, [workspace, surface, focusedPaneId, refresh]);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      const ctrl = e.ctrlKey || e.metaKey;
-      if (!ctrl) return;
-      const k = e.key.toLowerCase();
-      const shift = e.shiftKey;
-      const alt = e.altKey;
-
+      const ctrl = e.ctrlKey || e.metaKey; if (!ctrl) return;
+      const k = e.key.toLowerCase(); const shift = e.shiftKey; const alt = e.altKey;
       if (shift && k === "p") { e.preventDefault(); setOverlay("palette"); }
       else if (!shift && !alt && k === "p") { e.preventDefault(); setOverlay("quickOpen"); }
       else if (!shift && e.key === ",") { e.preventDefault(); setOverlay("settings"); }
-      else if (!shift && !alt && k === "b") { e.preventDefault(); setSidebarOpen((v) => !v); }
+      else if (!shift && !alt && k === "b") { e.preventDefault(); toggleSidebar(); }
       else if (!shift && !alt && k === "n") { e.preventDefault(); newWorkspace(); }
-      else if (shift && k === "r") { e.preventDefault(); renameWorkspace(); }
+      else if (!shift && !alt && k === "f2") { e.preventDefault(); renameWorkspace(); }
       else if (shift && k === "w") { e.preventDefault(); if (workspace) closeWorkspace(workspace.id); }
       else if (!shift && !alt && k === "t") { e.preventDefault(); newSurface(); }
       else if (!shift && !alt && k === "w") { e.preventDefault(); if (surface) closeSurface(surface.id); }
-      else if (!shift && !alt && k === "d") { e.preventDefault(); splitPane("vertical"); }
       else if (shift && k === "d") { e.preventDefault(); splitPane("horizontal"); }
-      else if (shift && k === "l") { e.preventDefault(); setOverlay("logs"); }
-      else if (shift && k === "v") { e.preventDefault(); setOverlay("vault"); }
-      else if (shift && k === "s") { e.preventDefault(); setOverlay("snippets"); }
-      else if (shift && k === "q") { e.preventDefault(); setOverlay("quota"); }
-      else if (alt && k === "h") { e.preventDefault(); setOverlay("history"); }
-      else if (shift && k === "a") { e.preventDefault(); setOverlay("agents"); }
-      else if (shift && k === "e") { e.preventDefault(); setOverlay("wsSettings"); }
-      else if (shift && k === "f") { e.preventDefault(); setSearchOpen(true); }
+      else if (!shift && !alt && k === "d") { e.preventDefault(); splitPane("vertical"); }
+      else if (alt && !shift && k === "h") { e.preventDefault(); setOverlay("history"); }
+      else if (shift && !alt && k === "j") { e.preventDefault(); openPanel("agentChat"); }
+      else if (shift && !alt && k === "l") { e.preventDefault(); openPanel("logs"); }
+      else if (shift && !alt && k === "v") { e.preventDefault(); openPanel("vault"); }
+      else if (shift && !alt && k === "q") { e.preventDefault(); openPanel("quota"); }
+      else if (shift && !alt && k === "a") { e.preventDefault(); openPanel("agents"); }
+      else if (shift && !alt && k === "o") { e.preventDefault(); openPanel("tree"); }
+      else if (shift && !alt && k === "g") { e.preventDefault(); setOverlay("kg"); }
+      else if (shift && !alt && k === "s") { e.preventDefault(); setOverlay("snippets"); }
       else if (shift && k === "z") { e.preventDefault(); toggleZoom(); }
-      else if (shift && k === "t") { e.preventDefault(); setOverlay("templates"); }
-      else if (alt && k === "b") { e.preventDefault(); setBroadcast((v) => !v); }
-      else if (shift && k === "o") { e.preventDefault(); setOverlay("tree"); }
-      else if (shift && k === "g") { e.preventDefault(); setOverlay("kg"); }
-      else if (shift && k === "j") { e.preventDefault(); setOverlay("agentChat"); }
-      else if (alt && (e.key === "ArrowLeft" || e.key === "ArrowUp")) { e.preventDefault(); focusAdjacent(-1); }
-      else if (alt && (e.key === "ArrowRight" || e.key === "ArrowDown")) { e.preventDefault(); focusAdjacent(1); }
-      else if (!shift && !alt && k === "i") { e.preventDefault(); setOverlay((o) => (o === "notifications" ? null : "notifications")); }
-      else if (shift && k === "]") { e.preventDefault(); cycleSurface(1); }
-      else if (shift && k === "[") { e.preventDefault(); cycleSurface(-1); }
-      else if (e.key === "Tab") { e.preventDefault(); cycleSurface(shift ? -1 : 1); }
-      else if (shift && k === "u") {
-        e.preventDefault();
-        api.getNotifications().then((r) => {
-          const latest = r.items.find((n) => !n.isRead);
-          if (latest) { setOverlay("notifications"); api.markNotificationRead(latest.id).then(refreshUnread); }
-        });
-      }
-      else if (!shift && !alt && /^[1-9]$/.test(e.key)) {
-        e.preventDefault();
-        const n = Number(e.key);
-        if (n === 9) selectWorkspaceByIndex((state?.workspaces.length ?? 1) - 1);
-        else selectWorkspaceByIndex(n - 1);
-      }
+      else if (alt && !shift && k === "b") { e.preventDefault(); setBroadcast((v) => !v); }
+      else if (shift && k === "f") { e.preventDefault(); setSearchOpen(true); }
+      else if (!shift && !alt && k === "tab") { e.preventDefault(); cycleSurface(1); }
+      else if (shift && k === "tab") { e.preventDefault(); cycleSurface(-1); }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [newWorkspace, newSurface, splitPane, renameWorkspace, closeWorkspace, closeSurface, cycleSurface, selectWorkspaceByIndex, workspace, surface, state, toggleZoom, focusAdjacent, setBroadcast, refreshUnread]);
 
-  const commands: Command[] = useMemo(() => [
-    { id: "ws.new", title: "Workspace: New", hint: "Ctrl+N", run: newWorkspace },
-    { id: "ws.rename", title: "Workspace: Rename", hint: "Ctrl+Shift+R", run: renameWorkspace },
+  const commands = useMemo(() => [
+    { id: "workspace.new", title: "Workspace: New", hint: "Ctrl+N", run: newWorkspace },
+    { id: "workspace.rename", title: "Workspace: Rename", hint: "F2", run: renameWorkspace },
     { id: "surface.new", title: "Surface: New", hint: "Ctrl+T", run: newSurface },
-    { id: "pane.split.v", title: "Pane: Split Right", hint: "Ctrl+D", run: () => splitPane("vertical") },
-    { id: "pane.split.h", title: "Pane: Split Down", hint: "Ctrl+Shift+D", run: () => splitPane("horizontal") },
-    { id: "notifications", title: "Notifications", hint: "Ctrl+I", run: () => setOverlay("notifications") },
-    { id: "jumpUnread", title: "Jump to Latest Unread", hint: "Ctrl+Shift+U", run: () => setOverlay("notifications") },
-    { id: "logs", title: "Command Logs", hint: "Ctrl+Shift+L", run: () => setOverlay("logs") },
-    { id: "vault", title: "Session Vault", hint: "Ctrl+Shift+V", run: () => setOverlay("vault") },
-    { id: "snippets", title: "Snippets", hint: "Ctrl+Shift+S", run: () => setOverlay("snippets") },
-    { id: "quota", title: "Agent Quota", hint: "Ctrl+Shift+Q", run: () => setOverlay("quota") },
-    { id: "history", title: "Command History", hint: "Ctrl+Alt+H", run: () => setOverlay("history") },
-    { id: "agents", title: "AI Agents", hint: "Ctrl+Shift+A", run: () => setOverlay("agents") },
-    { id: "agentChat", title: "Agent Chat", hint: "Ctrl+Shift+J", run: () => setOverlay("agentChat") },
-    { id: "agentSettings", title: "Agent Settings", run: () => setOverlay("agentSettings") },
-    { id: "search", title: "Search in Terminal", hint: "Ctrl+Shift+F", run: () => setSearchOpen(true) },
-    { id: "zoom", title: "Zoom/Unzoom Pane", hint: "Ctrl+Shift+Z", run: toggleZoom },
-    { id: "templates", title: "Workspace Templates", hint: "Ctrl+Shift+T", run: () => setOverlay("templates") },
-    { id: "tree", title: "Source Tree", hint: "Ctrl+Shift+O", run: () => setOverlay("tree") },
-    { id: "kg", title: "Knowledge Graph", hint: "Ctrl+Shift+G", run: () => setOverlay("kg") },
-    { id: "broadcast", title: "Toggle Broadcast Input", hint: "Ctrl+Alt+B", run: () => setBroadcast((v) => !v) },
-    { id: "trex", title: "T-Rex Runner (game)", run: () => setOverlay("trex") },
-    { id: "quickOpen", title: "Quick Open File", hint: "Ctrl+P", run: () => setOverlay("quickOpen") },
-    { id: "wsSettings", title: "Workspace Settings (env / SSH)", hint: "Ctrl+Shift+E", run: () => setOverlay("wsSettings") },
-    { id: "capture", title: "Capture Transcript (focused pane)", run: () => { if (focusedPaneId) api.capturePane(focusedPaneId); } },
-    { id: "settings", title: "Open Settings", hint: "Ctrl+,", run: () => setOverlay("settings") },
-    { id: "sidebar", title: "Toggle Sidebar", hint: "Ctrl+B", run: () => setSidebarOpen((v) => !v) },
-  ], [newWorkspace, renameWorkspace, newSurface, splitPane, focusedPaneId, toggleZoom]);
+    { id: "surface.splitRight", title: "Surface: Split Right", hint: "Ctrl+D", run: () => splitPane("vertical") },
+    { id: "surface.splitDown", title: "Surface: Split Down", hint: "Ctrl+Shift+D", run: () => splitPane("horizontal") },
+    { id: "surface.zoom", title: "Surface: Toggle Zoom", hint: "Ctrl+Shift+Z", run: toggleZoom },
+    { id: "surface.resetSplits", title: "Surface: Reset Splits", run: async () => {
+      if (!workspace || !surface) return;
+      const nodes: string[] = [];
+      const walk = (node: any) => { if (!node || node.isLeaf) return; nodes.push(node.id); walk(node.first); walk(node.second); };
+      walk(surface.root);
+      await Promise.all(nodes.map((nodeId) => api.setRatio(workspace.id, surface.id, nodeId, 0.5).catch(() => {})));
+      await refresh();
+    }},
+    { id: "palette", title: "Search", hint: "Ctrl+Shift+F", run: () => setSearchOpen(true) },
+    { id: "palette.cmd", title: "Command Palette", hint: "Ctrl+Shift+P", run: () => setOverlay("palette") },
+    { id: "palette.snippets", title: "Snippets", hint: "Ctrl+Shift+S", run: () => setOverlay("snippets") },
+  ], [newWorkspace, renameWorkspace, newSurface, splitPane, focusedPaneId, toggleZoom, workspace, surface, refresh]);
+
+  const menus: Record<string, { label: string; hint?: string; run: () => void }[]> = useMemo(() => ({
+    File: [
+      { label: "New Workspace", hint: "Ctrl+N", run: newWorkspace },
+      { label: "New Surface", hint: "Ctrl+T", run: newSurface },
+      { label: "Settings", hint: "Ctrl+,", run: () => setOverlay("settings") },
+      { label: "Exit", run: () => window.close() },
+    ],
+    Window: [
+      { label: "Split Right", hint: "Ctrl+D", run: () => splitPane("vertical") },
+      { label: "Split Down", hint: "Ctrl+Shift+D", run: () => splitPane("horizontal") },
+      { label: "Toggle Zoom", hint: "Ctrl+Shift+Z", run: toggleZoom },
+      { label: "Reset Splits", run: () => {
+        if (!workspace || !surface) return;
+        const nodes: string[] = [];
+        const walk = (node: any) => { if (!node || node.isLeaf) return; nodes.push(node.id); walk(node.first); walk(node.second); };
+        walk(surface.root);
+        Promise.all(nodes.map((nodeId) => api.setRatio(workspace.id, surface.id, nodeId, 0.5).catch(() => {}))).then(() => refresh());
+      }},
+    ],
+    View: [
+      { label: "Command Logs", hint: "Ctrl+Shift+L", run: () => openPanel("logs") },
+      { label: "Session Vault", hint: "Ctrl+Shift+V", run: () => openPanel("vault") },
+      { label: "Quota Tracking", hint: "Ctrl+Shift+Q", run: () => openPanel("quota") },
+      { label: "AI Agents", hint: "Ctrl+Shift+A", run: () => openPanel("agents") },
+      { label: "Source Tree", hint: "Ctrl+Shift+O", run: () => openPanel("tree") },
+      { label: "Knowledge Graph", hint: "Ctrl+Shift+G", run: () => setOverlay("kg") },
+      { label: "Terminal", run: () => { if (workspace?.surfaces.length === 0) newSurface(); } },
+      { label: "Toggle Workspaces", hint: "Ctrl+B", run: () => toggleSidebar() },
+      { label: "Agent Chat", hint: "Ctrl+Shift+J", run: () => openPanel("agentChat") },
+    ],
+    Help: [
+      { label: "Keyboard Shortcuts", run: () => setOverlay("palette") },
+      { label: "About", run: () => alert("cmux3") },
+    ],
+  }), [newWorkspace, newSurface, splitPane, toggleZoom, workspace, surface, refresh, openPanel, toggleSidebar]);
+
+  const terminalHeader = (
+    <div className="toolbar">
+        <button className="icon-btn" onClick={() => { if (focusedPaneId) api.capturePane(focusedPaneId); }} title="Capture transcript">›</button>
+        <button className="icon-btn" onClick={() => setOverlay("history")} title="Command history (Ctrl+Alt+H)">↓</button>
+        <span className="toolbar-sep" />
+        <button className="icon-btn" onClick={() => splitPane("vertical")} title="Split right (Ctrl+D)">▢▢</button>
+        <button className="icon-btn" onClick={() => splitPane("horizontal")} title="Split down (Ctrl+Shift+D)">⊟</button>
+        <div style={{ position: "relative" }}>
+          <button className="icon-btn" onClick={(e) => { e.stopPropagation(); setShellMenuOpen((v) => !v); }} title="Open pane with shell">⌹▾</button>
+          {shellMenuOpen && (
+            <div className="menu-dropdown" onClick={(e) => e.stopPropagation()}>
+              {shells.map((s) => (<div key={s.path} className="menu-dropdown-item" onClick={() => { setShellMenuOpen(false); openWithShell(s.path); }}><span>{s.name}</span></div>))}
+              <div className="terminal-context-sep" />
+              <div className="menu-dropdown-item" onClick={() => { setShellMenuOpen(false); openBrowserPane(); }}><span>Browser</span></div>
+              {shells.length === 0 && <div className="menu-dropdown-item" onClick={() => { setShellMenuOpen(false); openWithShell(); }}><span>Default shell</span></div>}
+            </div>
+          )}
+        </div>
+        <span className="toolbar-sep" />
+        <button className="icon-btn" onClick={() => applyLayout(2, 1)} title="Layout: 2 Columns">▥</button>
+        <button className="icon-btn" onClick={() => applyLayout(2, 2)} title="Layout: Grid 2x2">▦</button>
+        <button className="icon-btn" onClick={applyMainStackLayout} title="Layout: Main + Stack">▤</button>
+        <span className="toolbar-sep" />
+        <button className="icon-btn" onClick={equalizeSurface} disabled={!canArrangePanes} title={canArrangePanes ? "Equalize panes" : "Equalize panes (needs 2+ panes)"}>≋</button>
+        <button className={"icon-btn" + (zoomedPaneId ? " active-toggle" : "")} onClick={toggleZoom} disabled={!canArrangePanes} title={canArrangePanes ? "Zoom pane (Ctrl+Shift+Z)" : "Zoom pane (needs 2+ panes)"}>⤢</button>
+        <span className="toolbar-sep" />
+        <button className={"icon-btn" + (broadcast ? " active-toggle" : "")} onClick={() => setBroadcast((v) => !v)} title="Broadcast input (Ctrl+Alt+B)">⌗</button>
+        <div style={{ flex: 1 }} />
+        <div className="tab-search">
+          <span className="tab-search-icon">⌕</span>
+          <input ref={searchInputRef} value={searchTerm}
+            onChange={(e) => { setSearchTerm(e.target.value); terminalBus.search(focusedPaneId, e.target.value); }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") { e.preventDefault(); terminalBus.search(focusedPaneId, searchTerm, { back: e.shiftKey }); }
+              else if (e.key === "Escape") { e.preventDefault(); setSearchTerm(""); terminalBus.clearSearch(focusedPaneId); searchInputRef.current?.blur(); }
+            }}
+          />
+          <button className="icon-btn" onClick={() => terminalBus.search(focusedPaneId, searchTerm, { back: true })} title="Previous match">∧</button>
+          <button className="icon-btn" onClick={() => terminalBus.search(focusedPaneId, searchTerm)} title="Next match">∨</button>
+        </div>
+      </div>
+  );
+
+  const dockTheme = (settings?.uiThemeName === "Light") ? "dockview-theme-light" : "dockview-theme-abyss";
 
   if (!state) return <div className="loading">Loading cmux3...</div>;
 
   return (
-    <div className="app">
-      {sidebarOpen && (
-        <aside className="sidebar">
-          <div className="sidebar-head">
-            <span className="brand">cmux3</span>
-            <button className="icon-btn" onClick={newWorkspace} title="New workspace (Ctrl+N)">+</button>
-          </div>
-          <div className="ws-list">
-            {state.workspaces.map((w) => (
-              <div
-                key={w.id}
-                className={"ws-item" + (w.id === workspace?.id ? " active" : "")}
-                onClick={() => selectWorkspace(w.id)}
-              >
-                <span className="ws-dot" style={{ background: w.accentColor }} />
-                <span className="ws-info">
-                  <span className="ws-name">{w.name}</span>
-                  {wsStatus[w.id]?.branch && <span className="ws-branch mono">⎇ {wsStatus[w.id]?.branch}</span>}
-                </span>
-                {(wsStatus[w.id]?.unread ?? 0) > 0 && <span className="badge">{wsStatus[w.id]?.unread}</span>}
-                <button
-                  className="ws-close"
-                  onClick={(e) => { e.stopPropagation(); closeWorkspace(w.id); }}
-                  title="Close workspace"
-                >×</button>
+    <div className="app-shell" onClick={() => { if (openMenu) setOpenMenu(null); if (surfaceMenu) setSurfaceMenu(null); if (shellMenuOpen) setShellMenuOpen(false); }}>
+      <div className="menubar">
+        <span className="menubar-brand">cmux3</span>
+        {Object.keys(menus).map((m) => (
+          <div key={m} style={{ position: "relative" }}>
+            <button className={"menu-item" + (openMenu === m ? " open" : "")}
+              onClick={(e) => { e.stopPropagation(); setOpenMenu(openMenu === m ? null : m); }}
+              onMouseEnter={() => { if (openMenu) setOpenMenu(m); }}>{m}</button>
+            {openMenu === m && (
+              <div className="menu-dropdown">
+                {menus[m].map((it) => (
+                  <div key={it.label} className="menu-dropdown-item" onClick={(e) => { e.stopPropagation(); setOpenMenu(null); it.run(); }}>
+                    <span>{it.label}</span>{it.hint && <span className="menu-hint">{it.hint}</span>}
+                  </div>
+                ))}
               </div>
-            ))}
+            )}
           </div>
-          <div className="sidebar-foot">
-            <button className="side-tool" onClick={() => setOverlay("notifications")} title="Notifications (Ctrl+I)">
-              🔔 {unread > 0 && <span className="badge">{unread}</span>}
-            </button>
-            <button className="side-tool" onClick={() => setOverlay("logs")} title="Command Logs (Ctrl+Shift+L)">📜</button>
-            <button className="side-tool" onClick={() => setOverlay("vault")} title="Session Vault (Ctrl+Shift+V)">🗄️</button>
-            <button className="side-tool" onClick={() => setOverlay("snippets")} title="Snippets (Ctrl+Shift+S)">✂️</button>
-            <button className="side-tool" onClick={() => setOverlay("quota")} title="Agent Quota (Ctrl+Shift+Q)">📊</button>
-            <button className="side-tool" onClick={() => setOverlay("agents")} title="AI Agents (Ctrl+Shift+A)">🤖</button>
-            <button className="side-tool" onClick={() => setOverlay("wsSettings")} title="Workspace Settings (Ctrl+Shift+E)">🛠️</button>
-          </div>
-        </aside>
-      )}
-
+        ))}
+      </div>
+      <div className="app">
       <main className="main">
-        <div className="tabbar">
-          <button className="icon-btn" onClick={() => setSidebarOpen((v) => !v)} title="Toggle sidebar (Ctrl+B)">☰</button>
-          <div className="tabs">
-            {workspace?.surfaces.map((s) => (
-              <div
-                key={s.id}
-                className={"tab" + (s.id === surface?.id ? " active" : "")}
-                onClick={() => selectSurface(s.id)}
-                onDoubleClick={async () => {
-                  const name = prompt("Rename surface", s.name);
-                  if (name && workspace) { await api.renameSurface(workspace.id, s.id, name); await refresh(); }
-                }}
-              >
-                <span>{s.name}</span>
-                <button
-                  className="tab-close"
-                  onClick={(e) => { e.stopPropagation(); closeSurface(s.id); }}
-                >×</button>
-              </div>
-            ))}
-            <button className="icon-btn" onClick={newSurface} title="New surface (Ctrl+T)">+</button>
-          </div>
-          <div className="tabbar-right">
-            <button className="icon-btn" onClick={() => setOverlay("notifications")} title="Notifications (Ctrl+I)">
-              🔔{unread > 0 && <span className="badge">{unread}</span>}
-            </button>
-            <button className={"icon-btn" + (broadcast ? " active-toggle" : "")} onClick={() => setBroadcast((v) => !v)} title="Broadcast input (Ctrl+Alt+B)">📢</button>
-            <button className="icon-btn" onClick={() => splitPane("vertical")} title="Split right (Ctrl+D)">▯▯</button>
-            <button className="icon-btn" onClick={() => splitPane("horizontal")} title="Split down (Ctrl+Shift+D)">▭</button>
-            <button className="icon-btn" onClick={() => setOverlay("settings")} title="Settings (Ctrl+,)">⚙</button>
-          </div>
-        </div>
-
-        <div className="surface-area">
-          {searchOpen && <SearchOverlay paneId={focusedPaneId} onClose={() => setSearchOpen(false)} />}
-          {surface ? (
-            <SplitView
-              wsId={workspace!.id}
-              sId={surface.id}
-              node={
-                zoomedPaneId && surface.panes[zoomedPaneId]
-                  ? { id: "zoom", isLeaf: true, direction: "vertical", splitRatio: 0.5, paneId: zoomedPaneId }
-                  : surface.root
-              }
-              panes={surface.panes}
-              focusedPaneId={surface.focusedPaneId}
-              theme={activeTheme}
-              fontFamily={fontFamily}
-              fontSize={fontSize}
-              customColors={customColors}
-              onFocus={focusPane}
-              onClosePane={closePane}
-              onTitle={setPaneTitle}
-              onCwd={setPaneCwd}
-              onNotify={onTerminalNotify}
-              onSetType={setPaneType}
-              onRatio={setRatio}
-            />
-          ) : (
-            <div className="empty-surface">
-              <p>No surfaces. Create one to get started.</p>
-              <button className="primary" onClick={newSurface}>New surface</button>
-            </div>
-          )}
-        </div>
+        <DockLayout
+          openPanels={activePanels} uiTheme={dockTheme} state={state} workspace={workspace} surface={surface}
+          zoomedPaneId={zoomedPaneId} focusedPaneId={focusedPaneId} focusedCwd={focusedCwd}
+          theme={activeTheme} fontFamily={fontFamily} fontSize={fontSize} customColors={customColors} settings={settings}
+          searchOpen={searchOpen} setSearchOpen={setSearchOpen} refresh={refresh} refreshUnread={refreshUnread}
+          insertIntoFocused={insertIntoFocused} focusPane={focusPane} closePane={closePane}
+          setPaneTitle={setPaneTitle} setPaneCwd={setPaneCwd} onTerminalNotify={onTerminalNotify}
+          setPaneType={setPaneType} setRatio={setRatio} splitPane={splitPane} toggleZoom={toggleZoom}
+          newSurface={newSurface} selectSurface={selectSurface} closeSurface={closeSurface} closePanel={closePanel} openPanel={openPanel}
+          selectWorkspace={selectWorkspace} closeWorkspace={closeWorkspace} newWorkspace={newWorkspace}
+          wsStatus={wsStatus} unread={unread} broadcast={broadcast}
+          openNotifications={() => setOverlay("notifications")} openTrex={() => setOverlay("trex")}
+          terminalHeader={terminalHeader}
+        />
       </main>
-
       {overlay === "palette" && <CommandPalette commands={commands} onClose={() => setOverlay(null)} />}
-      {overlay === "settings" && (
-        <SettingsModal themes={themes} onClose={() => setOverlay(null)} onApplied={(s) => setSettings(s)} />
-      )}
-      {overlay === "notifications" && (
-        <NotificationsPanel onClose={() => setOverlay(null)} onChanged={refreshUnread} />
-      )}
-      {overlay === "logs" && <CommandLogsPanel onClose={() => setOverlay(null)} />}
-      {overlay === "vault" && <SessionVaultPanel onClose={() => setOverlay(null)} />}
-      {overlay === "snippets" && (
-        <SnippetsPanel onClose={() => setOverlay(null)} onInsert={insertIntoFocused} />
-      )}
-      {overlay === "quota" && <QuotaPanel onClose={() => setOverlay(null)} />}
-      {overlay === "history" && (
-        <HistoryPicker paneId={focusedPaneId} onClose={() => setOverlay(null)} onPick={insertIntoFocused} />
-      )}
-      {overlay === "agents" && <AgentsPanel onClose={() => setOverlay(null)} />}
+      {overlay === "settings" && <SettingsModal themes={themes} onClose={() => setOverlay(null)} onApplied={(s) => setSettings(s)} />}
+      {overlay === "notifications" && <NotificationsPanel onClose={() => setOverlay(null)} onChanged={refreshUnread} />}
+      {overlay === "snippets" && <SnippetsPanel onClose={() => setOverlay(null)} onInsert={insertIntoFocused} />}
+      {overlay === "history" && <HistoryPicker paneId={focusedPaneId} onClose={() => setOverlay(null)} onPick={insertIntoFocused} />}
       {overlay === "templates" && <TemplatesPanel onClose={() => setOverlay(null)} workspaceId={workspace?.id} workspaceName={workspace?.name} onApplied={refresh} />}
-      {overlay === "tree" && <SourceTreePanel initialPath={focusedCwd} onClose={() => setOverlay(null)} />}
       {overlay === "kg" && <KnowledgeGraphPanel cwd={focusedCwd} onClose={() => setOverlay(null)} />}
       {overlay === "trex" && <TrexRunner onClose={() => setOverlay(null)} />}
-      {overlay === "quickOpen" && (
-        <QuickOpen root={focusedCwd} onClose={() => setOverlay(null)} onPick={(p) => insertIntoFocused(JSON.stringify(p))} />
-      )}
-      {overlay === "agentChat" && <AgentChatPanel paneId={focusedPaneId} onClose={() => setOverlay(null)} />}
-      {overlay === "agentSettings" && <AgentSettingsPanel onClose={() => setOverlay(null)} />}
-      {overlay === "wsSettings" && workspace && (
-        <WorkspaceSettingsPanel workspace={workspace} onClose={() => setOverlay(null)} />
-      )}
+      {overlay === "quickOpen" && <QuickOpen root={focusedCwd} onClose={() => setOverlay(null)} onPick={(p) => {}} />}
+    </div>
     </div>
   );
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

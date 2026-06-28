@@ -18,9 +18,9 @@ if (-not $NoBuild) {
     npm run build
   } finally { Pop-Location }
 
-  dotnet publish "$root/server/Cmux.Launcher/Cmux.Launcher.csproj" -c Release -o "$root/dist" | Out-Host
-  dotnet publish "$root/server/Cmux.Web/Cmux.Web.csproj"           -c Release -o "$root/dist" | Out-Host
-  dotnet publish "$root/server/Cmux.Cli/Cmux.Cli.csproj"           -c Release -o "$root/dist" | Out-Host
+  dotnet publish "$root/server/Cmux.Launcher/Cmux.Launcher.csproj" -c Release -r win-x64 --self-contained true -p:PublishSingleFile=false -o "$root/dist" | Out-Host
+  dotnet publish "$root/server/Cmux.Web/Cmux.Web.csproj"           -c Release -r win-x64 --self-contained true -p:PublishSingleFile=false -o "$root/dist" | Out-Host
+  dotnet publish "$root/server/Cmux.Cli/Cmux.Cli.csproj"           -c Release -r win-x64 --self-contained true -p:PublishSingleFile=false -o "$root/dist" | Out-Host
 }
 
 $dist = Join-Path $root "dist"
@@ -40,3 +40,4 @@ if (($userPath -split ";") -notcontains $dist) {
 
 Write-Host ""
 Write-Host "Done. Open a NEW terminal and run:  cmux3" -ForegroundColor Green
+

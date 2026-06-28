@@ -16,8 +16,15 @@ export function HistoryPicker({ paneId, onClose, onPick }: Props) {
   useEffect(() => { api.getHistory(paneId).then(setAll); inputRef.current?.focus(); }, [paneId]);
 
   const filtered = useMemo(() => {
-    const q = query.toLowerCase();
-    return all.filter((c) => c.toLowerCase().includes(q));
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (let i = all.length - 1; i >= 0; i--) {
+      const c = all[i];
+      if (seen.has(c)) continue;
+      seen.add(c);
+      if (c.toLowerCase().includes(query.toLowerCase())) out.push(c);
+    }
+    return out;
   }, [all, query]);
   const clamped = Math.min(index, Math.max(0, filtered.length - 1));
 
@@ -25,22 +32,49 @@ export function HistoryPicker({ paneId, onClose, onPick }: Props) {
     if (e.key === "Escape") onClose();
     else if (e.key === "ArrowDown") { e.preventDefault(); setIndex((i) => Math.min(i + 1, filtered.length - 1)); }
     else if (e.key === "ArrowUp") { e.preventDefault(); setIndex((i) => Math.max(i - 1, 0)); }
-    else if (e.key === "Enter") { e.preventDefault(); const c = filtered[clamped]; if (c) { onClose(); onPick(c); } }
+    else if (e.key === "Enter") {
+      e.preventDefault();
+      const c = filtered[clamped];
+      if (c) { if (e.shiftKey) { onPick(c); onClose(); } else { onPick(c + "\r"); onClose(); } }
+    }
+    else if (e.key === "c" && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      const c = filtered[clamped];
+      if (c) navigator.clipboard?.writeText(c).catch(() => {});
+    }
   };
 
   return (
-    <div className="overlay" onMouseDown={onClose}>
-      <div className="palette" onMouseDown={(e) => e.stopPropagation()}>
-        <input ref={inputRef} className="palette-input" placeholder="Command history..."
-          value={query} onChange={(e) => { setQuery(e.target.value); setIndex(0); }} onKeyDown={onKey} />
-        <div className="palette-list">
-          {filtered.map((c, i) => (
-            <div key={i} className={"palette-item" + (i === clamped ? " active" : "")}
-              onMouseEnter={() => setIndex(i)} onClick={() => { onClose(); onPick(c); }}>
-              <span className="mono">{c}</span>
-            </div>
-          ))}
-          {filtered.length === 0 && <div className="palette-empty">No history</div>}
+    <div className="cmux-popup-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="cmux-popup-panel" onMouseDown={(e) => e.stopPropagation()} style={{ maxWidth: 620, maxHeight: 560 }}>
+        <div className="cmux-panel-toolbar">
+          <div className="cmux-panel-toolbar-row">
+            <span className="cmux-panel-title">COMMAND HISTORY{paneId ? ` · ${paneId.slice(0, 8)}` : ""}</span>
+            <span className="cmux-spacer" />
+            <button className="cmux-icon-btn" onClick={onClose}>×</button>
+          </div>
+        </div>
+        <div className="cmux-panel-toolbar" style={{ borderTop: "none" }}>
+          <div className="cmux-panel-toolbar-row">
+            <input ref={inputRef} style={{ flex: 1 }} placeholder="Search history (Enter = run, Shift+Enter = insert)..."
+              value={query} onChange={(e) => { setQuery(e.target.value); setIndex(0); }} onKeyDown={onKey} />
+          </div>
+        </div>
+        <div className="cmux-panel-body" style={{ maxHeight: 400, padding: 0, overflow: "auto" }}>
+          <table className="cmux-grid">
+            <thead>
+              <tr><th style={{ width: 56 }}>#</th><th>Command</th></tr>
+            </thead>
+            <tbody>
+              {filtered.map((c, i) => (
+                <tr key={i} className={i === clamped ? "cmux-row-active" : ""} onMouseEnter={() => setIndex(i)} onClick={() => { onPick(c + "\r"); onClose(); }}>
+                  <td className="dim mono">{i + 1}</td>
+                  <td className="mono">{c}</td>
+                </tr>
+              ))}
+              {filtered.length === 0 && <tr><td colSpan={2} className="cmux-empty">No history</td></tr>}
+            </tbody>
+          </table>
         </div>
       </div>
     </div>
