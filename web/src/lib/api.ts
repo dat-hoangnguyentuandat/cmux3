@@ -159,7 +159,9 @@ export const api = {
     req<{ branch?: string; remote?: string }>(`/api/git/branch${cwd ? `?cwd=${encodeURIComponent(cwd)}` : ""}`),
   getPorts: (paneId: string) => req<number[]>(`/api/ports?paneId=${paneId}`),
   closeClientTab: (clientTabId: string) =>
-    req<void>(`/api/browser/client-tab/${encodeURIComponent(clientTabId)}`, { method: "DELETE" }),
+    req<void>(`/api/browser/client-tab/${encodeURIComponent(clientTabId)}`, { method: "DELETE", keepalive: true }),
+  cleanupOrphanBrowserTabs: () =>
+    req<void>("/api/browser/cleanup-orphans", { method: "POST", keepalive: true }),
   canEmbed: (url: string) =>
     req<{ canEmbed: boolean; reason: string; xFrameOptions?: string }>(`/api/browser/can-embed?url=${encodeURIComponent(url)}`),
   updatePane: (wsId: string, sId: string, paneId: string, patch: { type?: string; url?: string; notes?: string }) =>

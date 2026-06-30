@@ -298,7 +298,12 @@ export function WebPane({ wsId, sId, paneId, url }: Props) {
       try { api.closeClientTab(removed.browserTabId); } catch { /* ignore */ }
     }
     setTabs((rows) => {
-      if (rows.length === 1) return rows;
+      if (rows.length === 1) {
+        const replacement = newTab(HOME_URL);
+        setActiveId(replacement.id);
+        persistPaneUrl(replacement.url);
+        return [replacement];
+      }
       const idx = rows.findIndex((t) => t.id === id);
       const next = rows.filter((t) => t.id !== id);
       if (id === activeId) {

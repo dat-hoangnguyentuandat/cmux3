@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Net.WebSockets;
 using System.Text;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 
 namespace Cmux.Web.Services.Browser;
@@ -82,6 +83,7 @@ public sealed class ChromeCdpProvider : IBrowserProvider
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "cmux3", "browser-profile");
         Directory.CreateDirectory(profileDir);
+        ResetSessionRestoreState(profileDir);
 
         try
         {
@@ -95,6 +97,8 @@ public sealed class ChromeCdpProvider : IBrowserProvider
             psi.ArgumentList.Add($"--user-data-dir={profileDir}");
             psi.ArgumentList.Add("--no-first-run");
             psi.ArgumentList.Add("--no-default-browser-check");
+            psi.ArgumentList.Add("--disable-session-crashed-bubble");
+            psi.ArgumentList.Add("--restore-last-session=false");
             psi.ArgumentList.Add("--remote-allow-origins=*");
             // Run a REAL (non-headless) browser to avoid anti-bot challenges, but push the
             // window far off-screen so the user only sees it via CDP screencast.
@@ -109,11 +113,80 @@ public sealed class ChromeCdpProvider : IBrowserProvider
             psi.ArgumentList.Add("--disable-backgrounding-occluded-windows");
             psi.ArgumentList.Add("--disable-renderer-backgrounding");
             psi.ArgumentList.Add("--disable-background-timer-throttling");
-            psi.ArgumentList.Add("about:blank");
+            psi.ArgumentList.Add("https://www.google.com/webhp?igu=1");
             _browserProcess = Process.Start(psi);
             return true;
         }
         catch { return false; }
+    }
+
+    /// <summary>
+    /// The live browser uses a dedicated Chromium profile for cookies/storage, but
+    /// Chromium also stores session-restore data there. If cmux3 kills the hidden
+    /// browser or Windows closes it abruptly, the next launch can resurrect every
+    /// old off-screen tab. Clear only the session restore files/flags, preserving
+    /// normal profile data such as cookies and cache.
+    /// </summary>
+    private static void ResetSessionRestoreState(string profileDir)
+    {
+        var defaultProfile = Path.Combine(profileDir, "Default");
+        foreach (var path in new[]
+        {
+            Path.Combine(defaultProfile, "Sessions"),
+        })
+        {
+            try { if (Directory.Exists(path)) Directory.Delete(path, recursive: true); }
+            catch { /* best-effort */ }
+        }
+
+        foreach (var file in new[]
+        {
+            Path.Combine(defaultProfile, "Last Session"),
+            Path.Combine(defaultProfile, "Last Tabs"),
+            Path.Combine(defaultProfile, "Current Session"),
+            Path.Combine(defaultProfile, "Current Tabs"),
+            Path.Combine(profileDir, "Last Session"),
+            Path.Combine(profileDir, "Last Tabs"),
+            Path.Combine(profileDir, "Current Session"),
+            Path.Combine(profileDir, "Current Tabs"),
+        })
+        {
+            try { if (File.Exists(file)) File.Delete(file); }
+            catch { /* best-effort */ }
+        }
+
+        MarkCleanExit(Path.Combine(defaultProfile, "Preferences"), profilePrefs: true);
+        MarkCleanExit(Path.Combine(profileDir, "Local State"), profilePrefs: false);
+    }
+
+    private static void MarkCleanExit(string jsonPath, bool profilePrefs)
+    {
+        try
+        {
+            if (!File.Exists(jsonPath)) return;
+            var node = JsonNode.Parse(File.ReadAllText(jsonPath)) as JsonObject;
+            if (node == null) return;
+
+            if (profilePrefs)
+            {
+                var profile = node["profile"] as JsonObject;
+                if (profile == null)
+                {
+                    profile = new JsonObject();
+                    node["profile"] = profile;
+                }
+                profile["exit_type"] = "Normal";
+                profile["exited_cleanly"] = true;
+                profile["restore_on_startup"] = 5;
+            }
+            else
+            {
+                node["exited_cleanly"] = true;
+            }
+
+            File.WriteAllText(jsonPath, node.ToJsonString(new JsonSerializerOptions { WriteIndented = false }));
+        }
+        catch { /* corrupt preferences should not block browser launch */ }
     }
 
     private static string? FindBrowserExecutable()
