@@ -764,6 +764,16 @@ app.Map("/ws/terminal/{paneId}", async (HttpContext ctx, TerminalSessionManager 
         async data => await SendText("o" + Convert.ToBase64String(data)),
         async ev => await SendText("e" + JsonSerializer.Serialize(ev, json)));
 
+    // Push the current mouse-tracking state to the client immediately. TUI
+    // apps (claude/codex/opencode) enable DEC mouse modes during init, so the
+    // client needs to know before the first right-click — otherwise the
+    // browser default menu shows up briefly and the user sees a flash.
+    var session = term.Get(paneId);
+    if (session != null)
+        await SendText("e" + JsonSerializer.Serialize(
+            new TerminalSessionManager.TerminalEvent("mouseTracking", paneId,
+                session.Buffer.MouseEnabled ? "1" : "0"), json));
+
     try
     {
         var buffer = new byte[8192];

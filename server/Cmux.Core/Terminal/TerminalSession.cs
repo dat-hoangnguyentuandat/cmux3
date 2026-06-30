@@ -203,6 +203,19 @@ public sealed class TerminalSession : IDisposable
         Redraw?.Invoke();
     }
 
+    private static string EscapeDebug(string s)
+    {
+        var sb = new StringBuilder();
+        foreach (var ch in s)
+        {
+            if (ch == 0x1B) sb.Append("\\e");
+            else if (ch == '[') sb.Append("[");
+            else if (char.IsControl(ch)) sb.Append($"<0x{(int)ch:x2}>");
+            else sb.Append(ch);
+        }
+        return sb.ToString();
+    }
+
     private void ReadLoop()
     {
         var buffer = new byte[4096];

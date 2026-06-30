@@ -77,6 +77,9 @@ public sealed class TerminalSessionManager : IDisposable
             session.BellReceived += () => Emit(newEntry, new TerminalEvent("bell", id));
             session.ProcessExited += () => Emit(newEntry, new TerminalEvent("exit", id));
 
+            session.Buffer.MouseEnabledChanged += enabled =>
+                Emit(newEntry, new TerminalEvent("mouseTracking", id, enabled ? "1" : "0"));
+
             session.InputSubmitted += cmd =>
             {
                 if (ShellWorkingDirectoryResolver.TryResolveCdCommand(cmd, session.WorkingDirectory, out var newCwd))

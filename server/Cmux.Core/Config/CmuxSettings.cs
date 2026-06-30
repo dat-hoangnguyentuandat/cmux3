@@ -50,6 +50,14 @@ public class CmuxSettings
     public bool ConfirmOnClose { get; set; } = true;
     public bool AutoCopyOnSelect { get; set; } = false;
     public bool CtrlClickOpensUrls { get; set; } = true;
+    public bool QuickWriteEnabled { get; set; } = true;
+    // Default (false): in plain shells (pwsh/cmd, no DEC mouse tracking) a
+    // right-click opens cmux's context menu; inside mouse-tracking TUI apps
+    // (claude-code / codex / cline) a plain right-click is forwarded to the TUI
+    // (which uses it as "paste") and only Shift+Right opens cmux's menu. When
+    // true, a plain right-click always opens cmux's menu everywhere — we
+    // intercept the click before xterm can forward it to the TUI.
+    public bool RightClickAlwaysMenu { get; set; } = false;
     public int AutoSaveIntervalSeconds { get; set; } = 30;
     public bool CaptureTranscriptsOnClose { get; set; } = true;
     public bool CaptureTranscriptsOnClear { get; set; } = true;

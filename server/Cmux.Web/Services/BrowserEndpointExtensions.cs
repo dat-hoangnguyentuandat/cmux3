@@ -129,9 +129,15 @@ public static class BrowserEndpointExtensions
         // Close the live Chrome tab bound to a cmux3 client (pane) tab id.
         // The frontend calls this on tab close / pane close so the real
         // browser tab on the host is shut down — not left running off-screen.
-        app.MapDelete("/api/browser/client-tab/{clientTabId}", async (BrowserManager m, string clientTabId, CancellationToken ct) =>
+        app.MapDelete("/api/browser/client-tab/{clientTabId}", async (BrowserManager m, string clientTabId) =>
         {
-            await m.CloseClientTabAsync(clientTabId, ct);
+            await m.CloseClientTabAsync(clientTabId, CancellationToken.None);
+            return Results.Ok();
+        });
+
+        app.MapPost("/api/browser/cleanup-orphans", async (BrowserManager m) =>
+        {
+            await m.CleanupOrphanedTabsAsync(CancellationToken.None);
             return Results.Ok();
         });
 

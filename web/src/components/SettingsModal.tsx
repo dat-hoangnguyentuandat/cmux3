@@ -47,7 +47,7 @@ const SHORTCUTS: [string, string][] = [
   ["Ctrl+Shift+L", "Open command logs"],
   ["Ctrl+Alt+H", "Open command history"],
   ["Ctrl+Shift+V", "Open session vault"],
-  ["Shift+Right-click", "Context menu (mouse apps)"],
+  ["Right-click", "Context menu"],
 ];
 
 // ── Reusable field components ──
@@ -401,6 +401,8 @@ export function SettingsModal({ themes, onClose, onApplied }: Props) {
             <Check label="Confirm Close" checked={!!s.confirmOnClose} onChange={(v) => set({ confirmOnClose: v })} text="Ask before closing window" />
             <Check label="Auto Copy" checked={!!s.autoCopyOnSelect} onChange={(v) => set({ autoCopyOnSelect: v })} text="Copy to clipboard on text selection" />
             <Check label="Ctrl+Click URLs" checked={!!s.ctrlClickOpensUrls} onChange={(v) => set({ ctrlClickOpensUrls: v })} text="Open URLs with Ctrl+Click" />
+            <Check label="Quick Write" checked={s.quickWriteEnabled !== false} onChange={(v) => set({ quickWriteEnabled: v })} text="Show the floating write button after left-clicking a terminal pane" />
+            <Check label="Right-Click Menu" checked={!!s.rightClickAlwaysMenu} onChange={(v) => set({ rightClickAlwaysMenu: v })} text="Always open context menu on right-click, even inside TUI apps (overrides their paste). Off = Shift+Right-click opens the menu inside TUI apps." />
             <Row label="Auto Save (sec)"><Num value={s.autoSaveIntervalSeconds} onChange={(v) => set({ autoSaveIntervalSeconds: v })} style={{ width: 80 }} min={5} /></Row>
             <Row label="Log Retention (days)"><Num value={s.commandLogRetentionDays} onChange={(v) => set({ commandLogRetentionDays: v })} style={{ width: 80 }} min={0} /></Row>
             <Check label="Capture On Close" checked={!!s.captureTranscriptsOnClose} onChange={(v) => set({ captureTranscriptsOnClose: v })} text="Save transcript when pane/surface/workspace/app closes" />

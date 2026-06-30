@@ -21,6 +21,7 @@ public sealed class BrowserManager : IAsyncDisposable
     private int _listenerSeq;
     private string? _activeTabId;
     private volatile bool _started;
+    private bool _orphanTabsCleaned;
 
     // Stable mapping from a client-supplied tab identifier (used by each
     // BrowserView pane) to the dedicated CDP target id it owns. This is what
@@ -113,6 +114,30 @@ public sealed class BrowserManager : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Close live-browser page targets that are not owned by the current cmux3
+    /// server process. This is intentionally non-launching: if no debug browser
+    /// is reachable, it does nothing. It handles stale tabs left by a previous
+    /// cmux3 run before any new BrowserView is opened.
+    /// </summary>
+    public async Task CleanupOrphanedTabsAsync(CancellationToken ct = default)
+    {
+        await _gate.WaitAsync(ct);
+        try
+        {
+            await CleanupOrphanedTabsCoreAsync(ct);
+            if (_clientTabToCdp.IsEmpty)
+            {
+                IReadOnlyList<ProviderTab> live;
+                try { live = await _provider.ListTabsAsync(ct); }
+                catch { live = Array.Empty<ProviderTab>(); }
+                if (live.Count == 0)
+                    await _provider.QuitAsync(ct);
+            }
+        }
+        finally { _gate.Release(); }
+    }
+
     public async Task FocusTabAsync(string tabId, CancellationToken ct = default)
     {
         await _provider.FocusTabAsync(tabId, ct);
@@ -150,6 +175,8 @@ public sealed class BrowserManager : IAsyncDisposable
         // client tabId — or an explicit forceNew — ever opens a new Chrome tab.
         if (!string.IsNullOrEmpty(tabId))
         {
+            await CleanupOrphanedTabsOnFirstClientUseAsync(ct);
+
             // Reattach to the CDP tab this client tab already owns, if it is still alive.
             if (!forceNew && _clientTabToCdp.TryGetValue(tabId, out var mappedCdpId))
             {
@@ -214,6 +241,40 @@ public sealed class BrowserManager : IAsyncDisposable
     {
         if (_clientTabToCdp.TryRemove(clientTabId, out var cdpId))
             _cdpToClientTab.TryRemove(cdpId, out _);
+    }
+
+    /// <summary>
+    /// A cmux3 restart loses the in-memory client-tab -> CDP-tab mapping, but
+    /// Chromium may still be alive with tabs from the previous process. Before
+    /// the first mapped BrowserView opens a new tab, close any unowned page
+    /// targets so hidden live-browser tabs cannot accumulate across sessions.
+    /// </summary>
+    private async Task CleanupOrphanedTabsOnFirstClientUseAsync(CancellationToken ct)
+    {
+        await _gate.WaitAsync(ct);
+        try
+        {
+            if (_orphanTabsCleaned) return;
+            _orphanTabsCleaned = true;
+            await CleanupOrphanedTabsCoreAsync(ct);
+        }
+        finally { _gate.Release(); }
+    }
+
+    private async Task CleanupOrphanedTabsCoreAsync(CancellationToken ct)
+    {
+        var owned = _cdpToClientTab.Keys.ToHashSet(StringComparer.Ordinal);
+        IReadOnlyList<ProviderTab> live;
+        try { live = await _provider.ListTabsAsync(ct); }
+        catch { live = Array.Empty<ProviderTab>(); }
+
+        foreach (var tab in live)
+        {
+            if (owned.Contains(tab.Id)) continue;
+            try { await _provider.CloseTabAsync(tab.Id, ct); } catch { /* best-effort cleanup */ }
+            _tabs.TryRemove(tab.Id, out _);
+            if (_activeTabId == tab.Id) _activeTabId = null;
+        }
     }
 
     public BrowserTabState? GetActiveTab()

@@ -1,5 +1,7 @@
 namespace Cmux.Core.Terminal;
 
+using System.Threading.Tasks;
+
 /// <summary>
 /// Manages the terminal cell grid, cursor state, scrollback buffer,
 /// and scroll regions. This is the core data structure that the VT parser
@@ -38,11 +40,48 @@ public class TerminalBuffer
     public bool IsAlternateScreen { get; private set; }
 
     // Mouse tracking modes
-    public bool MouseTrackingNormal { get; set; }    // Mode 1000: button events
-    public bool MouseTrackingButton { get; set; }    // Mode 1002: button + motion while pressed
-    public bool MouseTrackingAny { get; set; }       // Mode 1003: all motion
+    private bool _mouseTrackingNormal;    // Mode 1000: button events
+    private bool _mouseTrackingButton;    // Mode 1002: button + motion while pressed
+    private bool _mouseTrackingAny;       // Mode 1003: all motion
     public bool MouseSgrExtended { get; set; }       // Mode 1006: SGR extended coordinates
-    public bool MouseEnabled => MouseTrackingNormal || MouseTrackingButton || MouseTrackingAny;
+    public bool MouseTrackingNormal
+    {
+        get => _mouseTrackingNormal;
+        set { if (_mouseTrackingNormal != value) { _mouseTrackingNormal = value; RaiseMouseEnabledChangedIfChanged(); } }
+    }
+    public bool MouseTrackingButton
+    {
+        get => _mouseTrackingButton;
+        set { if (_mouseTrackingButton != value) { _mouseTrackingButton = value; RaiseMouseEnabledChangedIfChanged(); } }
+    }
+    public bool MouseTrackingAny
+    {
+        get => _mouseTrackingAny;
+        set { if (_mouseTrackingAny != value) { _mouseTrackingAny = value; RaiseMouseEnabledChangedIfChanged(); } }
+    }
+    public bool MouseEnabled => _mouseTrackingNormal || _mouseTrackingButton || _mouseTrackingAny;
+
+    /// <summary>
+    /// Fires whenever <see cref="MouseEnabled"/> transitions value. The web client
+    /// uses this to decide whether plain right-click should open cmux's context
+    /// menu (TUI apps that enabled mouse tracking swallow the click, so the
+    /// browser never raises `contextmenu`).
+    /// </summary>
+    public event Action<bool>? MouseEnabledChanged;
+
+    private bool _lastMouseEnabled = false;
+    private void RaiseMouseEnabledChangedIfChanged()
+    {
+        var now = MouseEnabled;
+        if (now != _lastMouseEnabled)
+        {
+            _lastMouseEnabled = now;
+            // Fire-and-forget — subscribers (TerminalSessionManager) marshal
+            // the callback onto their own thread, so this never blocks the
+            // VT parser's read loop even on a slow client.
+            _ = Task.Run(() => MouseEnabledChanged?.Invoke(now));
+        }
+    }
 
     private bool _wrapPending;
 
