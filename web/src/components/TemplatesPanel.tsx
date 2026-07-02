@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api, type WorkspaceTemplate } from "../lib/api";
+import { useAppDialog } from "./AppDialog";
 
 interface Props {
   onClose: () => void;
@@ -9,6 +10,7 @@ interface Props {
 }
 
 export function TemplatesPanel({ onClose, workspaceId, workspaceName, onApplied }: Props) {
+  const dialog = useAppDialog();
   const [items, setItems] = useState<WorkspaceTemplate[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
 
@@ -19,7 +21,7 @@ export function TemplatesPanel({ onClose, workspaceId, workspaceName, onApplied 
   const apply = async (id: string) => { await api.applyTemplate(id); onApplied?.(); onClose(); };
   const saveCurrent = async () => {
     if (!workspaceId) return;
-    const name = prompt("Template name", workspaceName || "Template");
+    const name = await dialog.prompt("Template name", workspaceName || "Template");
     if (!name) return;
     await api.saveTemplateFromWorkspace(workspaceId, name);
     await load();

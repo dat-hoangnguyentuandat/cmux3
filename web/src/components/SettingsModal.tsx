@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api, type TerminalTheme } from "../lib/api";
+import { useAppDialog } from "./AppDialog";
 
 interface Props {
   themes: TerminalTheme[];
@@ -262,6 +263,7 @@ function McpServersEditor({ servers, onChange }: { servers: any[]; onChange: (s:
 // ── Main component ──
 
 export function SettingsModal({ themes, onClose, onApplied }: Props) {
+  const dialog = useAppDialog();
   const [settings, setSettings] = useState<any>(null);
   const [shells, setShells] = useState<{ name: string; path: string }[]>([]);
   const [tab, setTab] = useState<Tab>("appearance");
@@ -286,8 +288,9 @@ export function SettingsModal({ themes, onClose, onApplied }: Props) {
     onClose();
   };
 
-  const reset = () => {
-    if (!confirm("Reset all settings to defaults?")) return;
+  const reset = async () => {
+    const ok = await dialog.confirm("Reset settings", "Reset all settings to defaults?", "Reset");
+    if (!ok) return;
     api.saveSettings({}).then((saved) => { setSettings(saved); onApplied(saved); });
   };
 
@@ -387,7 +390,6 @@ export function SettingsModal({ themes, onClose, onApplied }: Props) {
             <Check label="Visual Bell" checked={!!s.visualBell} onChange={(v) => set({ visualBell: v })} />
             <Check label="Bracketed Paste" checked={!!s.bracketedPaste} onChange={(v) => set({ bracketedPaste: v })} />
             <Check label="Vim Mode" checked={!!s.vimMode} onChange={(v) => set({ vimMode: v })} text="Enable vim keybindings (hjkl, w/b/e, d/c/y, dd/cc)" />
-            <Check label="Knowledge Graph" checked={!!s.knowledgeGraphEnabled} onChange={(v) => set({ knowledgeGraphEnabled: v })} text="Auto-index repos and show mini graph overlay" />
             <Row label="Word Separators"><Txt value={s.wordSeparators ?? " \t\n{}[]()\"'`,:;<>"} onChange={(v) => set({ wordSeparators: v })} style={{ width: "100%" }} /></Row>
           </div>
         );

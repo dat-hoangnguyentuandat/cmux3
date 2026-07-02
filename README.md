@@ -152,7 +152,6 @@ one process.
 - Full settings (appearance/terminal/behavior) with JSON export/import
 - UI themes: Dark+ / Light / High Contrast
 - Ad block toggle for web panes (network-level blocking is desktop/WebView2-only)
-- T-Rex runner easter-egg game
 - Quick open fuzzy file finder — `Ctrl+P`
 - Custom terminal colors (background/foreground/cursor/selection)
 - Save current workspace layout as a reusable template, and apply templates to spawn new workspaces

@@ -102,6 +102,19 @@ body {
 .ws-title-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .ws-accent-dot { width: 16px; height: 16px; border-radius: 4px; flex-shrink: 0; }
 .ws-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-weight: 600; }
+.ws-name-input {
+  flex: 1;
+  min-width: 0;
+  height: 22px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--accent);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-weight: 600;
+  outline: none;
+}
 .ws-branch, .ws-pane-line { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; color: var(--text-dim); }
 .ws-branch::before { content: "branch "; opacity: 0.65; }
 .ws-search { padding: 8px 6px; }
@@ -443,8 +456,6 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 .agent-content.md pre code { background: none; padding: 0; }
 .agent-content.md h1, .agent-content.md h2, .agent-content.md h3 { margin: 6px 0; font-size: 14px; }
 .agent-content.md a { color: var(--accent); }
-.trex-canvas { background: rgba(0,0,0,0.25); border-radius: 8px; }
-
 .ws-info { display: flex; flex-direction: column; flex: 1; min-width: 0; }
 .ws-branch { font-size: 10px; opacity: 0.55; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ws-item .badge { position: static; margin-right: 4px; }
@@ -601,6 +612,43 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
   border-radius: 10px; box-shadow: 0 20px 60px rgba(0,0,0,0.65);
   display: flex; flex-direction: column; overflow: hidden;
 }
+.cmux-dialog {
+  width: min(420px, 92vw);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.65);
+  padding: 16px;
+}
+.cmux-dialog-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 8px;
+}
+.cmux-dialog-message {
+  color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1.45;
+  margin-bottom: 12px;
+}
+.cmux-dialog-input {
+  width: 100%;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-size: 13px;
+  outline: none;
+}
+.cmux-dialog-input:focus { border-color: var(--accent); }
+.cmux-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
+}
 
 /* ── Settings popup ── */
 .cmux-settings-popup {
@@ -711,8 +759,15 @@ select.set-input { cursor: pointer; }
 .cmux-surface-slot .tab { min-width: unset; height: 100%; padding: 0 10px; border-radius: 0; background: transparent; }
 .cmux-surface-slot .tab.active { background: var(--panel); }
 .cmux-surface-slot .tab-add { height: 100%; padding: 0 8px; font-size: 14px; border-radius: 0; }
-.docked-panel { display: flex; flex-direction: column; height: 100%; min-height: 0; }
-.docked-panel > .cmux-panel { display: flex; flex-direction: column; height: 100%; min-height: 0; background: var(--bg); }
+.docked-panel { display: flex; flex-direction: column; height: 100%; min-height: 0; overflow: auto; }
+.docked-panel > .cmux-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-width: 620px;
+  min-height: 0;
+  background: var(--bg);
+}
 .docked-panel > .cmux-panel > .cmux-agent-chat { flex: 1 1 auto; height: auto; }
 .cmux-panel-toolbar { display: flex; flex-direction: column; gap: 8px; padding: 12px 12px 8px; border-bottom: 1px solid var(--border); background: var(--bg); flex-shrink: 0; }
 .cmux-panel-toolbar-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
@@ -776,7 +831,7 @@ select.set-input { cursor: pointer; }
 .cmux-list-row { display: flex; align-items: center; justify-content: space-between; }
 .cmux-list-title { font-size: 13px; }
 .cmux-list-meta { font-size: 11px; }
-.cmux-split-body { display: flex; min-height: 0; padding: 10px 12px; gap: 8px; }
+.cmux-split-body { display: flex; min-width: 596px; min-height: 0; padding: 10px 12px; gap: 8px; }
 .cmux-split-divider { width: 1px; background: var(--border); }
 .cmux-split-content { flex: 1; overflow: auto; padding: 8px 12px; min-width: 0; border: 1px solid var(--border); background: var(--panel); }
 .cmux-mono-pre { font-family: "Cascadia Code", Consolas, monospace; font-size: 11px; color: var(--text-dim); }
@@ -916,6 +971,9 @@ input[type="number"]:focus, input[type="password"]:focus, select:focus { border-
 .web-bar input:focus { border-color: var(--accent); }
 .web-icon-btn { background: transparent; border: 0; color: var(--text-dim); cursor: pointer; padding: 4px 6px; border-radius: 4px; font-size: 14px; }
 .web-icon-btn:hover { background: var(--panel); color: var(--text); }
+.web-content-stack { flex: 1; min-height: 0; position: relative; background: #fff; overflow: hidden; }
+.web-content-stack > .web-view-host,
+.web-content-stack > .web-frame { position: absolute; inset: 0; width: 100%; height: 100%; }
 .web-view-host { flex: 1; min-height: 0; background: #fff; overflow: hidden; }
 .browser-view { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; overflow: hidden; position: relative; }
 .browser-view-frame { max-width: 100%; max-height: 100%; object-fit: contain; display: block; }

@@ -20,7 +20,6 @@ public sealed class BrowserManager : IAsyncDisposable
     private readonly SemaphoreSlim _gate = new(1, 1);
     private int _listenerSeq;
     private string? _activeTabId;
-    private volatile bool _started;
     private bool _orphanTabsCleaned;
 
     // Stable mapping from a client-supplied tab identifier (used by each
@@ -115,6 +114,22 @@ public sealed class BrowserManager : IAsyncDisposable
     }
 
     /// <summary>
+    /// Drop a client-tab binding after Chrome has already closed the target.
+    /// This updates cmux bookkeeping without sending another close command.
+    /// </summary>
+    public async Task ForgetClientTabAsync(string clientTabId, CancellationToken ct = default)
+    {
+        if (string.IsNullOrEmpty(clientTabId)) return;
+        if (_clientTabToCdp.TryRemove(clientTabId, out var cdpId))
+        {
+            _cdpToClientTab.TryRemove(cdpId, out _);
+            _tabs.TryRemove(cdpId, out _);
+            if (_activeTabId == cdpId) _activeTabId = _tabs.Keys.FirstOrDefault();
+            await Emit(BrowserEvent.TabClosed, new { id = cdpId });
+        }
+    }
+
+    /// <summary>
     /// Close live-browser page targets that are not owned by the current cmux3
     /// server process. This is intentionally non-launching: if no debug browser
     /// is reachable, it does nothing. It handles stale tabs left by a previous
@@ -164,7 +179,7 @@ public sealed class BrowserManager : IAsyncDisposable
     /// Resolve the CDP debugger WebSocket URL for a tab, opening a tab first if none exists.
     /// Used by the screencast view to attach and stream frames.
     /// </summary>
-    public async Task<(string tabId, string debuggerWsUrl)?> GetDebuggerTargetAsync(string? tabId, string? fallbackUrl, bool forceNew = false, CancellationToken ct = default)
+    public async Task<(string tabId, string debuggerWsUrl)?> GetDebuggerTargetAsync(string? tabId, string? fallbackUrl, bool forceNew = false, string? adoptCdpTabId = null, CancellationToken ct = default)
     {
         await EnsureStartedAsync(ct);
 
@@ -175,6 +190,17 @@ public sealed class BrowserManager : IAsyncDisposable
         // client tabId — or an explicit forceNew — ever opens a new Chrome tab.
         if (!string.IsNullOrEmpty(tabId))
         {
+            if (!string.IsNullOrEmpty(adoptCdpTabId))
+            {
+                var adopted = await _provider.GetTabAsync(adoptCdpTabId, ct);
+                if (adopted?.DebuggerWebSocketUrl is { Length: > 0 } aws)
+                {
+                    BindClientTab(tabId, adopted.Id);
+                    TrackTab(adopted);
+                    return (adopted.Id, aws);
+                }
+            }
+
             await CleanupOrphanedTabsOnFirstClientUseAsync(ct);
 
             // Reattach to the CDP tab this client tab already owns, if it is still alive.
@@ -190,8 +216,23 @@ public sealed class BrowserManager : IAsyncDisposable
                 ForgetClientTab(tabId);
             }
 
-            // First time we see this client tab (or its tab was closed): open a
-            // fresh, dedicated CDP tab and bind it to this client tabId.
+            // First time we see this client tab (or its tab was closed): take
+            // the bootstrap about:blank target Chrome creates at launch when it
+            // is the only page. Closing that last target can make Chromium start
+            // shutting down while /json/new is racing to create the real tab,
+            // which leaves the screencast attached to a white/half-dead surface.
+            if (_clientTabToCdp.IsEmpty)
+            {
+                var bootstrap = await GetSingleBlankBootstrapTabAsync(ct);
+                if (bootstrap?.DebuggerWebSocketUrl is { Length: > 0 } bws)
+                {
+                    BindClientTab(tabId, bootstrap.Id);
+                    TrackTab(bootstrap);
+                    return (bootstrap.Id, bws);
+                }
+            }
+
+            // Otherwise open a fresh, dedicated CDP tab and bind it to this client tabId.
             var openUrl = string.IsNullOrEmpty(fallbackUrl) ? "about:blank" : fallbackUrl;
             var fresh = await _provider.OpenTabAsync(openUrl, ct);
             BindClientTab(tabId, fresh.Id);
@@ -243,6 +284,14 @@ public sealed class BrowserManager : IAsyncDisposable
             _cdpToClientTab.TryRemove(cdpId, out _);
     }
 
+    private async Task<ProviderTab?> GetSingleBlankBootstrapTabAsync(CancellationToken ct)
+    {
+        IReadOnlyList<ProviderTab> live;
+        try { live = await _provider.ListTabsAsync(ct); }
+        catch { return null; }
+        return live.Count == 1 && IsBlankUrl(live[0].Url) ? live[0] : null;
+    }
+
     /// <summary>
     /// A cmux3 restart loses the in-memory client-tab -> CDP-tab mapping, but
     /// Chromium may still be alive with tabs from the previous process. Before
@@ -268,9 +317,14 @@ public sealed class BrowserManager : IAsyncDisposable
         try { live = await _provider.ListTabsAsync(ct); }
         catch { live = Array.Empty<ProviderTab>(); }
 
+        var keepBootstrapBlank = owned.Count == 0 &&
+                                 live.Count == 1 &&
+                                 IsBlankUrl(live[0].Url);
+
         foreach (var tab in live)
         {
             if (owned.Contains(tab.Id)) continue;
+            if (keepBootstrapBlank && tab.Id == live[0].Id) continue;
             try { await _provider.CloseTabAsync(tab.Id, ct); } catch { /* best-effort cleanup */ }
             _tabs.TryRemove(tab.Id, out _);
             if (_activeTabId == tab.Id) _activeTabId = null;
@@ -327,7 +381,6 @@ public sealed class BrowserManager : IAsyncDisposable
     private async Task EnsureStartedAsync(CancellationToken ct)
     {
         await _provider.EnsureStartedAsync(ct);
-        _started = true;
     }
 
     // ── Helpers ─────────────────────────────────────────────────────────
@@ -362,6 +415,10 @@ public sealed class BrowserManager : IAsyncDisposable
             && string.Equals(ua.AbsolutePath, ub.AbsolutePath, StringComparison.OrdinalIgnoreCase)
             && ua.Query == ub.Query;
     }
+
+    private static bool IsBlankUrl(string? url)
+        => string.IsNullOrWhiteSpace(url) ||
+           string.Equals(url, "about:blank", StringComparison.OrdinalIgnoreCase);
 
     public async ValueTask DisposeAsync()
     {

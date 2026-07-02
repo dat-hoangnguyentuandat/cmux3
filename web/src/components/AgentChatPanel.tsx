@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, type AgentMessage, type AgentThread } from "../lib/api";
 import { renderMarkdown } from "../lib/markdown";
+import { useAppDialog } from "./AppDialog";
 
 interface Msg {
   id: string;
@@ -29,6 +30,7 @@ interface Props {
 }
 
 export function AgentChatPanel({ paneId }: Props) {
+  const dialog = useAppDialog();
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
   const [status, setStatus] = useState("Idle");
@@ -189,7 +191,8 @@ export function AgentChatPanel({ paneId }: Props) {
     const id = selectedThreadId || threadRef.current;
     if (!id) { setStatus("Select a thread to delete"); return; }
     const selected = threads.find((t) => t.id === id);
-    if (!confirm(`Delete thread '${selected?.title ?? id}' and all its messages?`)) return;
+    const ok = await dialog.confirm("Delete thread", `Delete '${selected?.title ?? id}' and all its messages?`, "Delete");
+    if (!ok) return;
     try {
       await api.deleteThread(id);
       threadRef.current = undefined;

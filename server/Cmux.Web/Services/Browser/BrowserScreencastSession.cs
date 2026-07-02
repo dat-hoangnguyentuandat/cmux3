@@ -1,4 +1,5 @@
 using System.Net.WebSockets;
+using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -14,7 +15,15 @@ namespace Cmux.Web.Services.Browser;
 public sealed class BrowserScreencastSession : IAsyncDisposable
 {
     private readonly ClientWebSocket _cdp = new();
+    private readonly ClientWebSocket _browserCdp = new();
+    private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(5) };
+    private readonly ConcurrentDictionary<string, byte> _knownPageTargets = new();
+    private string? _tabId;
+    private Uri? _devToolsListUri;
     private int _cmdId;
+    private int _browserCmdId;
+    private long _lastUserInputTicks;
+    private int _popupScanRunning;
     // In-flight CDP request id -> completion (filled by HandleMessage when the
     // matching response arrives; consumed by GetNavigationHistoryAsync).
     private readonly System.Collections.Concurrent.ConcurrentDictionary<int, TaskCompletionSource<JsonNode?>> _pending = new();
@@ -25,19 +34,34 @@ public sealed class BrowserScreencastSession : IAsyncDisposable
     /// <summary>Raised when the tab's title or URL changes (title, url).</summary>
     public event Func<string, string, Task>? MetaReceived;
 
+    /// <summary>Raised when the page tries to open a new browser target.</summary>
+    public event Func<string, string, bool, Task>? PopupTargetCreated;
+
+    /// <summary>Raised when a browser target disappears.</summary>
+    public event Func<string, Task>? PopupTargetClosed;
+
     // Reserved CDP command id used to poll the live document title/URL.
     private const int MetaEvalId = 1_000_000;
 
     /// <summary>Connect to the tab's debugger socket and start screencasting.</summary>
-    public async Task StartAsync(string debuggerWsUrl, CancellationToken ct)
+    public async Task StartAsync(string debuggerWsUrl, string tabId, int initialWidth, int initialHeight, double initialDpr, CancellationToken ct)
     {
+        _tabId = tabId;
         _cdp.Options.SetRequestHeader("Origin", "http://localhost");
         await _cdp.ConnectAsync(new Uri(debuggerWsUrl), ct);
 
         _ = Task.Run(() => ReceiveLoop(ct), ct);
+        ConfigureDevToolsHttp(debuggerWsUrl);
+        await SnapshotPageTargetsAsync(ct);
 
         await SendAsync("Page.enable", null, ct);
         await SendAsync("Runtime.enable", null, ct);
+        await StartBrowserTargetMonitorAsync(debuggerWsUrl, ct);
+        await SetViewportAsync(
+            initialWidth > 0 ? initialWidth : 1280,
+            initialHeight > 0 ? initialHeight : 800,
+            initialDpr > 0 ? initialDpr : 1,
+            ct);
         // Non-headless Chrome only renders/screencasts the foreground tab. Bring
         // this target to the front so background tabs still produce frames.
         await SendAsync("Page.bringToFront", null, ct);
@@ -51,6 +75,96 @@ public sealed class BrowserScreencastSession : IAsyncDisposable
         }, ct);
         // Report the initial title/URL so the tab label is correct on connect.
         await RequestMetaAsync(ct);
+    }
+
+    private void ConfigureDevToolsHttp(string targetDebuggerWsUrl)
+    {
+        try
+        {
+            var targetUri = new Uri(targetDebuggerWsUrl);
+            var scheme = targetUri.Scheme.Equals("wss", StringComparison.OrdinalIgnoreCase) ? "https" : "http";
+            _devToolsListUri = new Uri($"{scheme}://{targetUri.Host}:{targetUri.Port}/json/list");
+        }
+        catch { _devToolsListUri = null; }
+    }
+
+    private async Task StartBrowserTargetMonitorAsync(string targetDebuggerWsUrl, CancellationToken ct)
+    {
+        var browserWsUrl = await ResolveBrowserDebuggerUrlAsync(targetDebuggerWsUrl, ct);
+        if (string.IsNullOrWhiteSpace(browserWsUrl)) return;
+
+        _browserCdp.Options.SetRequestHeader("Origin", "http://localhost");
+        await _browserCdp.ConnectAsync(new Uri(browserWsUrl), ct);
+        _ = Task.Run(() => BrowserReceiveLoop(ct), ct);
+
+        await SendBrowserAsync("Target.setDiscoverTargets", new JsonObject { ["discover"] = true }, ct);
+    }
+
+    private async Task<string?> ResolveBrowserDebuggerUrlAsync(string targetDebuggerWsUrl, CancellationToken ct)
+    {
+        try
+        {
+            var targetUri = new Uri(targetDebuggerWsUrl);
+            var scheme = targetUri.Scheme.Equals("wss", StringComparison.OrdinalIgnoreCase) ? "https" : "http";
+            var versionUri = new Uri($"{scheme}://{targetUri.Host}:{targetUri.Port}/json/version");
+            var json = await _http.GetStringAsync(versionUri, ct);
+            return JsonNode.Parse(json)?["webSocketDebuggerUrl"]?.GetValue<string>();
+        }
+        catch { return null; }
+    }
+
+    private async Task SnapshotPageTargetsAsync(CancellationToken ct)
+    {
+        foreach (var (id, _) in await ListPageTargetsAsync(ct))
+            _knownPageTargets.TryAdd(id, 0);
+        if (!string.IsNullOrEmpty(_tabId))
+            _knownPageTargets.TryAdd(_tabId, 0);
+    }
+
+    private async Task<List<(string id, string url)>> ListPageTargetsAsync(CancellationToken ct)
+    {
+        var rows = new List<(string id, string url)>();
+        if (_devToolsListUri == null) return rows;
+        try
+        {
+            var json = await _http.GetStringAsync(_devToolsListUri, ct);
+            if (JsonNode.Parse(json) is not JsonArray arr) return rows;
+            foreach (var node in arr)
+            {
+                if (node?["type"]?.GetValue<string>() != "page") continue;
+                var id = node["id"]?.GetValue<string>();
+                if (string.IsNullOrEmpty(id)) continue;
+                rows.Add((id, node["url"]?.GetValue<string>() ?? ""));
+            }
+        }
+        catch { /* best-effort popup discovery */ }
+        return rows;
+    }
+
+    private void MarkUserInput()
+    {
+        Interlocked.Exchange(ref _lastUserInputTicks, DateTime.UtcNow.Ticks);
+        if (Interlocked.CompareExchange(ref _popupScanRunning, 1, 0) == 0)
+            _ = Task.Run(() => ScanForNewTargetsAfterUserInput(CancellationToken.None));
+    }
+
+    private async Task ScanForNewTargetsAfterUserInput(CancellationToken ct)
+    {
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                var last = new DateTime(Interlocked.Read(ref _lastUserInputTicks), DateTimeKind.Utc);
+                if (DateTime.UtcNow - last > TimeSpan.FromSeconds(5)) return;
+
+                foreach (var (id, url) in await ListPageTargetsAsync(ct))
+                    await NotifyNewTargetIfNeeded(id, url);
+
+                await Task.Delay(250, ct);
+            }
+        }
+        catch { /* scanner must not break the session */ }
+        finally { Interlocked.Exchange(ref _popupScanRunning, 0); }
     }
 
     /// <summary>Ask the page for its current document.title + location.href.</summary>
@@ -150,10 +264,83 @@ public sealed class BrowserScreencastSession : IAsyncDisposable
         }
     }
 
+    private async Task BrowserReceiveLoop(CancellationToken ct)
+    {
+        var buffer = new byte[1 << 16];
+        var sb = new StringBuilder();
+        try
+        {
+            while (_browserCdp.State == WebSocketState.Open && !ct.IsCancellationRequested)
+            {
+                sb.Clear();
+                WebSocketReceiveResult result;
+                do
+                {
+                    result = await _browserCdp.ReceiveAsync(buffer, ct);
+                    if (result.MessageType == WebSocketMessageType.Close) return;
+                    sb.Append(Encoding.UTF8.GetString(buffer, 0, result.Count));
+                } while (!result.EndOfMessage);
+
+                await HandleBrowserMessage(sb.ToString(), ct);
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (WebSocketException) { }
+    }
+
+    private async Task HandleBrowserMessage(string raw, CancellationToken ct)
+    {
+        JsonNode? node;
+        try { node = JsonNode.Parse(raw); }
+        catch { return; }
+        var method = node?["method"]?.GetValue<string>();
+        if (method == "Target.targetDestroyed")
+        {
+            var closedTargetId = node?["params"]?["targetId"]?.GetValue<string>();
+            if (!string.IsNullOrEmpty(closedTargetId))
+            {
+                _knownPageTargets.TryRemove(closedTargetId, out _);
+                if (PopupTargetClosed != null)
+                    await PopupTargetClosed(closedTargetId);
+            }
+            return;
+        }
+        if (method != "Target.targetCreated" && method != "Target.targetInfoChanged") return;
+
+        var info = node?["params"]?["targetInfo"];
+        var targetId = info?["targetId"]?.GetValue<string>();
+        var type = info?["type"]?.GetValue<string>();
+        var openerId = info?["openerId"]?.GetValue<string>();
+        var url = info?["url"]?.GetValue<string>() ?? "";
+        if (!string.IsNullOrEmpty(targetId) &&
+            targetId != _tabId &&
+            string.Equals(type, "page", StringComparison.OrdinalIgnoreCase) &&
+            (openerId == _tabId || UserInputIsRecent()))
+        {
+            await NotifyNewTargetIfNeeded(targetId, url);
+        }
+    }
+
+    private bool UserInputIsRecent()
+    {
+        var ticks = Interlocked.Read(ref _lastUserInputTicks);
+        if (ticks <= 0) return false;
+        return DateTime.UtcNow - new DateTime(ticks, DateTimeKind.Utc) <= TimeSpan.FromSeconds(5);
+    }
+
+    private async Task NotifyNewTargetIfNeeded(string targetId, string url)
+    {
+        if (string.IsNullOrEmpty(targetId) || targetId == _tabId) return;
+        if (!_knownPageTargets.TryAdd(targetId, 0)) return;
+        if (PopupTargetCreated != null)
+            await PopupTargetCreated(targetId, url, true);
+    }
+
     // ── Input forwarding ────────────────────────────────────────────────
 
     public Task DispatchMouseAsync(string type, double x, double y, string button, int clickCount, double deltaX, double deltaY, CancellationToken ct)
     {
+        if (type == "mousePressed") MarkUserInput();
         var p = new JsonObject
         {
             ["type"] = type,
@@ -172,6 +359,7 @@ public sealed class BrowserScreencastSession : IAsyncDisposable
 
     public Task DispatchKeyAsync(string type, string key, string code, int keyCode, string? text, CancellationToken ct)
     {
+        if (type == "keyDown" || type == "rawKeyDown") MarkUserInput();
         var p = new JsonObject
         {
             ["type"] = type,
@@ -260,6 +448,20 @@ public sealed class BrowserScreencastSession : IAsyncDisposable
         await _cdp.SendAsync(bytes, WebSocketMessageType.Text, true, ct);
     }
 
+    private async Task SendBrowserAsync(string method, JsonNode? @params, CancellationToken ct)
+    {
+        if (_browserCdp.State != WebSocketState.Open) return;
+        var id = Interlocked.Increment(ref _browserCmdId);
+        var cmd = new JsonObject
+        {
+            ["id"] = id,
+            ["method"] = method,
+            ["params"] = @params ?? new JsonObject(),
+        };
+        var bytes = Encoding.UTF8.GetBytes(cmd.ToJsonString());
+        await _browserCdp.SendAsync(bytes, WebSocketMessageType.Text, true, ct);
+    }
+
     public async ValueTask DisposeAsync()
     {
         try
@@ -269,9 +471,13 @@ public sealed class BrowserScreencastSession : IAsyncDisposable
                 await SendAsync("Page.stopScreencast", null, CancellationToken.None);
                 await _cdp.CloseAsync(WebSocketCloseStatus.NormalClosure, "", CancellationToken.None);
             }
+            if (_browserCdp.State == WebSocketState.Open)
+                await _browserCdp.CloseAsync(WebSocketCloseStatus.NormalClosure, "", CancellationToken.None);
         }
         catch { /* ignore */ }
         _cdp.Dispose();
+        _browserCdp.Dispose();
+        _http.Dispose();
     }
 }
 

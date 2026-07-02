@@ -4,19 +4,23 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { SearchAddon } from "@xterm/addon-search";
 import "@xterm/xterm/css/xterm.css";
-import type { TerminalTheme } from "../lib/api";
+import { api, type TerminalTheme } from "../lib/api";
 import { terminalBus } from "../lib/terminalBus";
 
 function WritePopup({
   onSend,
   onClose,
+  initialText,
+  onDraftChange,
   position,
 }: {
   onSend: (text: string) => void;
   onClose: () => void;
+  initialText: string;
+  onDraftChange: (text: string) => void;
   position?: { x: number; y: number } | null;
 }) {
-  const [text, setText] = useState("");
+  const [text, setText] = useState(initialText);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const popupRef = useRef<HTMLDivElement>(null);
   const [placed, setPlaced] = useState(false);
@@ -72,7 +76,10 @@ function WritePopup({
             ref={inputRef}
             className="write-popup-input"
             value={text}
-            onChange={(e) => setText(e.target.value)}
+            onChange={(e) => {
+              setText(e.target.value);
+              onDraftChange(e.target.value);
+            }}
             onKeyDown={onKeyDown}
             placeholder="Type here, Enter to send…"
             rows={1}
@@ -146,7 +153,7 @@ export function TerminalPane(props: Props) {
   const [measured, setMeasured] = useState(false);
   const [writeOpen, setWriteOpen] = useState(false);
   const [writePos, setWritePos] = useState<{ x: number; y: number } | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [writeDraft, setWriteDraft] = useState("");
   const menuRef = useRef<HTMLDivElement>(null);
   // Anchor position for the quick-write button. Set on left-click inside
   // the typeable region (button === 0, no TUI mouse tracking). Cleared
@@ -202,7 +209,7 @@ export function TerminalPane(props: Props) {
 
   const pasteClipboard = async () => {
     const text = await navigator.clipboard.readText().catch(() => "");
-    if (text) writeInput(text);
+    if (text) termRef.current?.paste(text);
   };
 
   const clearTerminal = () => {
@@ -284,6 +291,20 @@ export function TerminalPane(props: Props) {
           e.stopPropagation();
           return false;
         }
+      }
+      // Ctrl+V should paste clipboard text into the terminal. If it falls
+      // through as the raw Ctrl+V control byte, TUIs like codex/claude-code
+      // treat it as their own shortcut instead of receiving pasted text.
+      if (
+        (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey &&
+        (e.key === "v" || e.key === "V")
+      ) {
+        e.preventDefault();
+        e.stopPropagation();
+        navigator.clipboard.readText()
+          .then((text) => { if (text) term.paste(text); })
+          .catch(() => {});
+        return false;
       }
       return true; // every other key flows through normally
     });
@@ -391,16 +412,12 @@ export function TerminalPane(props: Props) {
     };
     const onRightMouseDown = (e: MouseEvent) => {
       if (e.button !== 2) return; // cmux2 only handles right-button down
-      // eslint-disable-next-line no-console
-      console.log("[cmux] right-mousedown", { mouseTracking: mouseTrackingRef.current, alwaysMenu: rightClickAlwaysMenuRef.current, shift: e.shiftKey, button: e.button });
       // Legacy mode: let the TUI handle a plain right-click while it is
       // tracking the mouse; only Shift+Right forces cmux's menu.
       if (!rightClickAlwaysMenuRef.current && mouseTrackingRef.current && !e.shiftKey) return;
       openMenu(e);
     };
     const onContextMenu = (e: MouseEvent) => {
-      // eslint-disable-next-line no-console
-      console.log("[cmux] contextmenu", { mouseTracking: mouseTrackingRef.current, alwaysMenu: rightClickAlwaysMenuRef.current, shift: e.shiftKey, button: e.button });
       if (!rightClickAlwaysMenuRef.current && mouseTrackingRef.current && !e.shiftKey) return;
       openMenu(e);
     };
@@ -538,20 +555,20 @@ export function TerminalPane(props: Props) {
     };
   }, [menu]);
 
-  const chooseFile = () => {
-    fileInputRef.current?.click();
-  };
-
-  const onFileChosen = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    // Paste the full file path into the terminal.
-    // On modern browsers we don't get the real filesystem path for
-    // security reasons — use file.name as a fallback.
-    const path = (file as any).path || file.name;
-    writeInput(path + " ");
-    // Reset so the same file can be re-chosen.
-    e.target.value = "";
+  const chooseFile = async () => {
+    try {
+      const picked = await api.chooseFile(cwd);
+      if (picked?.path) {
+        termRef.current?.paste(picked.path);
+        window.requestAnimationFrame(() => {
+          termRef.current?.focus();
+          props.onFocusRequest();
+        });
+      }
+    } catch {
+      // Browser file inputs cannot expose real full paths, so if the native
+      // local dialog is unavailable there is no useful fallback here.
+    }
   };
 
   const runMenuAction = (action: () => void | Promise<void>) => {
@@ -567,6 +584,7 @@ export function TerminalPane(props: Props) {
 
   const sendWritePopup = (text: string) => {
     writeInput(text);
+    setWriteDraft("");
     window.requestAnimationFrame(() => {
       window.requestAnimationFrame(() => {
         termRef.current?.focus();
@@ -650,16 +668,12 @@ export function TerminalPane(props: Props) {
           <button onClick={() => runMenuAction(() => props.onSearchRequest?.())}>Search<span>Ctrl+Shift+F</span></button>
         </div>
       )}
-      <input
-        ref={fileInputRef}
-        type="file"
-        style={{ display: "none" }}
-        onChange={onFileChosen}
-      />
       {writeOpen && (
         <WritePopup
           onSend={sendWritePopup}
           onClose={() => setWriteOpen(false)}
+          initialText={writeDraft}
+          onDraftChange={setWriteDraft}
           position={writePos}
         />
       )}
