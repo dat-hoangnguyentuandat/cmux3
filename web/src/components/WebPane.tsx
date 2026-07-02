@@ -13,6 +13,8 @@ interface BrowserTab {
   id: string;
   // Stable id for the underlying Chrome tab; persists across remounts so we don't lose context.
   browserTabId: string;
+  adoptCdpTabId?: string;
+  openerTabId?: string;
   title: string;
   url: string;
   draft: string;
@@ -168,6 +170,51 @@ function newTab(url = HOME_URL): BrowserTab {
   };
 }
 
+function LiveBrowserTabView({
+  paneId,
+  tab,
+  active,
+  rawUrl,
+  onHandle,
+  onMeta,
+  onPopup,
+  onPopupClosed,
+}: {
+  paneId: string;
+  tab: BrowserTab;
+  active: boolean;
+  rawUrl: string;
+  onHandle: (tabId: string, handle: BrowserViewHandle | null) => void;
+  onMeta: (tabId: string, meta: { title: string; url: string }) => void;
+  onPopup: (popup: { cdpTabId: string; url: string }) => void;
+  onPopupClosed: (popup: { cdpTabId: string }) => void;
+}) {
+  const ref = useCallback((handle: BrowserViewHandle | null) => {
+    onHandle(tab.id, handle);
+  }, [onHandle, tab.id]);
+  const meta = useCallback((value: { title: string; url: string }) => {
+    onMeta(tab.id, value);
+  }, [onMeta, tab.id]);
+
+  return (
+    <div
+      className="web-view-host"
+      style={{ display: active ? "block" : "none" }}
+    >
+      <BrowserView
+        key={`${paneId}-${tab.id}`}
+        ref={ref}
+        url={rawUrl}
+        tabId={tab.browserTabId}
+        adoptCdpTabId={tab.adoptCdpTabId}
+        onMeta={meta}
+        onPopup={onPopup}
+        onPopupClosed={onPopupClosed}
+      />
+    </div>
+  );
+}
+
 function extractRawUrl(normalizedOrProxied: string) {
   if (normalizedOrProxied.startsWith("/api/frame-proxy?")) {
     return new URL(normalizedOrProxied, location.origin).searchParams.get("url") ?? normalizedOrProxied;
@@ -180,10 +227,13 @@ export function WebPane({ wsId, sId, paneId, url }: Props) {
   const [tabs, setTabs] = useState<BrowserTab[]>(() => [newTab(initialUrl)]);
   const [activeId, setActiveId] = useState(() => tabs[0].id);
   const iframeRef = useRef<HTMLIFrameElement>(null);
-  const liveRef = useRef<BrowserViewHandle | null>(null);
+  const liveRefs = useRef<Record<string, BrowserViewHandle | null>>({});
   const dragIdRef = useRef<string | null>(null);
+  const adoptedPopupIdsRef = useRef(new Set<string>());
+  const activeIdRef = useRef(activeId);
 
   const active = useMemo(() => tabs.find((t) => t.id === activeId) ?? tabs[0], [tabs, activeId]);
+  useEffect(() => { activeIdRef.current = activeId; }, [activeId]);
 
   // How to render the active tab. Starts from a cheap local classification,
   // then refines via a server-side header probe (X-Frame-Options / CSP).
@@ -218,10 +268,10 @@ export function WebPane({ wsId, sId, paneId, url }: Props) {
 
   // Live title/URL reported by the CDP-backed browser session, so the tab
   // label reflects the page the user is actually on (e.g. YouTube, not Google).
-  const applyMeta = useCallback((meta: { title: string; url: string }) => {
+  const applyMetaForTab = useCallback((tabId: string, meta: { title: string; url: string }) => {
     const nextUrl = meta.url?.trim();
     setTabs((rows) => rows.map((tab) => {
-      if (tab.id !== active.id) return tab;
+      if (tab.id !== tabId) return tab;
       const nextTitle = meta.title ? clampTitle(meta.title) : tab.title;
       if (!nextUrl || nextUrl === "about:blank") {
         return nextTitle === tab.title ? tab : { ...tab, title: nextTitle };
@@ -246,7 +296,7 @@ export function WebPane({ wsId, sId, paneId, url }: Props) {
       return { ...tab, title: nextTitle, url: nextUrl, draft: nextUrl, history, index, liveSession: true };
     }));
     if (nextUrl && nextUrl !== "about:blank") persistPaneUrl(nextUrl);
-  }, [active.id, persistPaneUrl]);
+  }, [persistPaneUrl]);
 
   // When the entire web pane is torn down (user closed the split, switched
   // the pane type, deleted the workspace, etc.) close the real Chrome tab
@@ -264,7 +314,8 @@ export function WebPane({ wsId, sId, paneId, url }: Props) {
   const go = () => {
     const target = normalizeUrl(active.draft);
     if (!target) return;
-    if (liveRef.current) liveRef.current.go(target);
+    const activeLive = liveRefs.current[active.id];
+    if (activeLive) activeLive.go(target);
     patchActive((tab) => {
       const history = [...tab.history.slice(0, tab.index + 1), target];
       return { ...tab, title: titleFor(target), url: target, draft: target === YOUTUBE_HOME ? tab.draft : target, history, index: history.length - 1 };
@@ -289,13 +340,19 @@ export function WebPane({ wsId, sId, paneId, url }: Props) {
     persistPaneUrl(tab.url);
   };
 
-  const closeTab = (id: string) => {
+  const closeTab = (id: string, opts?: { closeRemote?: boolean }) => {
+    const closeRemote = opts?.closeRemote !== false;
     const removed = tabs.find((t) => t.id === id);
     if (removed) {
+      if (removed.adoptCdpTabId) adoptedPopupIdsRef.current.delete(removed.adoptCdpTabId);
       // Close the underlying live Chrome tab so the host browser doesn't keep
       // running a tab the user has no UI for. (The unmount cleanup only fires
       // when the whole WebPane is torn down.)
-      try { api.closeClientTab(removed.browserTabId); } catch { /* ignore */ }
+      if (closeRemote) {
+        try { api.closeClientTab(removed.browserTabId); } catch { /* ignore */ }
+      } else {
+        try { api.forgetClientTab(removed.browserTabId); } catch { /* ignore */ }
+      }
     }
     setTabs((rows) => {
       if (rows.length === 1) {
@@ -316,9 +373,10 @@ export function WebPane({ wsId, sId, paneId, url }: Props) {
   };
 
   const moveHistory = (delta: 1 | -1) => {
-    if (liveRef.current) {
-      if (delta < 0) liveRef.current.back();
-      else liveRef.current.forward();
+    const activeLive = liveRefs.current[active.id];
+    if (activeLive) {
+      if (delta < 0) activeLive.back();
+      else activeLive.forward();
       return;
     }
     const nextIndex = active.index + delta;
@@ -336,17 +394,64 @@ export function WebPane({ wsId, sId, paneId, url }: Props) {
   };
 
   const reload = () => {
-    if (liveRef.current) { liveRef.current.reload(); return; }
+    const activeLive = liveRefs.current[active.id];
+    if (activeLive) { activeLive.reload(); return; }
     patchActive((tab) => ({ ...tab, frameKey: tab.frameKey + 1 }));
   };
 
-  const setLiveHandle = useCallback((h: BrowserViewHandle | null) => {
-    liveRef.current = h;
+  const setLiveHandle = useCallback((tabId: string, h: BrowserViewHandle | null) => {
+    liveRefs.current[tabId] = h;
     if (!h) return;
-    setTabs((rows) => rows.map((tab) => (
-      tab.id === activeId && !tab.liveSession ? { ...tab, liveSession: true } : tab
-    )));
-  }, [activeId]);
+    setTabs((rows) => {
+      const target = rows.find((tab) => tab.id === tabId);
+      if (!target || target.liveSession) return rows;
+      return rows.map((tab) => (
+        tab.id === tabId ? { ...tab, liveSession: true } : tab
+      ));
+    });
+  }, []);
+
+  const openPopupTab = useCallback((popup: { cdpTabId: string; url: string }) => {
+    if (adoptedPopupIdsRef.current.has(popup.cdpTabId)) {
+      const existing = tabsRef.current.find((tab) => tab.adoptCdpTabId === popup.cdpTabId);
+      if (existing) setActiveId(existing.id);
+      return;
+    }
+    const existing = tabsRef.current.find((tab) => tab.adoptCdpTabId === popup.cdpTabId);
+    if (existing) {
+      setActiveId(existing.id);
+      return;
+    }
+    adoptedPopupIdsRef.current.add(popup.cdpTabId);
+    const popupUrl = popup.url || "about:blank";
+    const tab: BrowserTab = {
+      ...newTab(popupUrl),
+      browserTabId: crypto.randomUUID(),
+      adoptCdpTabId: popup.cdpTabId,
+      openerTabId: activeIdRef.current,
+      liveSession: true,
+    };
+    setTabs((rows) => [...rows, tab]);
+    setActiveId(tab.id);
+    persistPaneUrl(popupUrl);
+  }, [persistPaneUrl]);
+
+  const closePopupTab = useCallback((popup: { cdpTabId: string }) => {
+    const tab = tabsRef.current.find((row) => row.adoptCdpTabId === popup.cdpTabId);
+    if (!tab) return;
+    adoptedPopupIdsRef.current.delete(popup.cdpTabId);
+    liveRefs.current[tab.id] = null;
+    setTabs((rows) => {
+      const next = rows.filter((row) => row.id !== tab.id);
+      if (next.length === rows.length) return rows;
+      if (activeIdRef.current === tab.id) {
+        const opener = tab.openerTabId ? next.find((row) => row.id === tab.openerTabId) : undefined;
+        setActiveId((opener ?? next[0])?.id ?? activeIdRef.current);
+      }
+      return next.length > 0 ? next : rows;
+    });
+    try { api.forgetClientTab(tab.browserTabId); } catch { /* target already closed */ }
+  }, []);
 
   const reorder = (targetId: string) => {
     const sourceId = dragIdRef.current;
@@ -374,6 +479,16 @@ export function WebPane({ wsId, sId, paneId, url }: Props) {
     }
     return active.url;
   }, [active.url, active.draft]);
+
+  const rawUrlForTab = (tab: BrowserTab) => {
+    if (tab.url.startsWith("/api/frame-proxy?")) {
+      return new URL(tab.url, location.origin).searchParams.get("url") ?? tab.url;
+    }
+    if (tab.url === YOUTUBE_HOME) return tab.draft.startsWith("http") ? tab.draft : tab.url;
+    return tab.url;
+  };
+
+  const liveTabs = tabs.filter((tab) => tab.liveSession || (tab.id === active.id && effectiveRenderMode === "blocked"));
 
   return (
     <div className="web-pane">
@@ -411,26 +526,31 @@ export function WebPane({ wsId, sId, paneId, url }: Props) {
       </div>
 
       {/* ── Content ── */}
-      {effectiveRenderMode === "blocked" ? (
-        <div className="web-view-host">
-          <BrowserView
-            key={`${paneId}-${active.id}`}
-            ref={setLiveHandle}
-            url={rawCardUrl}
-            tabId={active.browserTabId}
-            onMeta={applyMeta}
+      <div className="web-content-stack">
+        {liveTabs.map((tab) => (
+          <LiveBrowserTabView
+            key={`${paneId}-${tab.id}`}
+            paneId={paneId}
+            tab={tab}
+            active={tab.id === active.id}
+            rawUrl={rawUrlForTab(tab)}
+            onHandle={setLiveHandle}
+            onMeta={applyMetaForTab}
+            onPopup={openPopupTab}
+            onPopupClosed={closePopupTab}
           />
-        </div>
-      ) : (
-        <iframe
-          key={`${active.id}-${active.frameKey}-${active.url}`}
-          ref={iframeRef}
-          className="web-frame"
-          src={active.url}
-          title={active.title}
-          sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox"
-        />
-      )}
+        ))}
+        {effectiveRenderMode !== "blocked" && (
+          <iframe
+            key={`${active.id}-${active.frameKey}-${active.url}`}
+            ref={iframeRef}
+            className="web-frame"
+            src={active.url}
+            title={active.title}
+            sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox"
+          />
+        )}
+      </div>
     </div>
   );
 }

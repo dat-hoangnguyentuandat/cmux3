@@ -3,8 +3,11 @@ import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRe
 interface Props {
   url: string;
   tabId?: string;
+  adoptCdpTabId?: string;
   /** Fired when the live tab reports its real title/URL (used for the tab label). */
   onMeta?: (meta: { title: string; url: string }) => void;
+  onPopup?: (popup: { cdpTabId: string; url: string }) => void;
+  onPopupClosed?: (popup: { cdpTabId: string }) => void;
 }
 
 const WS_BASE = () => {
@@ -39,7 +42,7 @@ export interface BrowserViewHandle {
   reload(): void;
 }
 
-export const BrowserView = forwardRef<BrowserViewHandle, Props>(function BrowserView({ url, tabId, onMeta }: Props, ref) {
+export const BrowserView = forwardRef<BrowserViewHandle, Props>(function BrowserView({ url, tabId, adoptCdpTabId, onMeta, onPopup, onPopupClosed }: Props, ref) {
   const imgRef = useRef<HTMLImageElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const socketRef = useRef<WebSocket | null>(null);
@@ -53,6 +56,10 @@ export const BrowserView = forwardRef<BrowserViewHandle, Props>(function Browser
   const paneTabId = useMemo(() => tabId ?? crypto.randomUUID(), [tabId]);
   const onMetaRef = useRef(onMeta);
   useEffect(() => { onMetaRef.current = onMeta; }, [onMeta]);
+  const onPopupRef = useRef(onPopup);
+  useEffect(() => { onPopupRef.current = onPopup; }, [onPopup]);
+  const onPopupClosedRef = useRef(onPopupClosed);
+  useEffect(() => { onPopupClosedRef.current = onPopupClosed; }, [onPopupClosed]);
 
   const urlRef = useRef(url);
   useEffect(() => { urlRef.current = url; }, [url]);
@@ -93,18 +100,26 @@ export const BrowserView = forwardRef<BrowserViewHandle, Props>(function Browser
 
     const connect = () => {
       const params = new URLSearchParams();
+      const rect = wrapRef.current?.getBoundingClientRect();
       // Always use the URL captured at mount time for the initial connect, so
       // editing the address bar does not cause a reconnect.
       params.set("url", urlRef.current);
       params.set("tabId", paneTabId);
+      params.set("width", String(Math.max(1, Math.round(rect?.width || 1280))));
+      params.set("height", String(Math.max(1, Math.round(rect?.height || 800))));
+      params.set("dpr", String(window.devicePixelRatio || 1));
+      if (adoptCdpTabId) params.set("adopt", adoptCdpTabId);
       // Each pane mounts its own Chrome tab; never reuse an existing one.
-      if (!tabId) params.set("new", "1");
+      if (!tabId && !adoptCdpTabId) params.set("new", "1");
       const ws = new WebSocket(`${WS_BASE()}?${params.toString()}`);
       socketRef.current = ws;
       setStatus("connecting");
       setError(null);
 
-      ws.onopen = () => flushPendingMessages();
+      ws.onopen = () => {
+        sendViewport();
+        flushPendingMessages();
+      };
       ws.onmessage = (e) => {
         const data = String(e.data);
         const type = data[0];
@@ -122,6 +137,14 @@ export const BrowserView = forwardRef<BrowserViewHandle, Props>(function Browser
           setStatus("live");
           sendViewport();
           flushPendingMessages();
+        } else if (type === "P") {
+          try {
+            onPopupRef.current?.(JSON.parse(body) as { cdpTabId: string; url: string });
+          } catch { /* ignore malformed popup */ }
+        } else if (type === "X") {
+          try {
+            onPopupClosedRef.current?.(JSON.parse(body) as { cdpTabId: string });
+          } catch { /* ignore malformed popup close */ }
         } else if (type === "E") {
           setError(body);
           setStatus("error");
@@ -153,7 +176,7 @@ export const BrowserView = forwardRef<BrowserViewHandle, Props>(function Browser
       try { socketRef.current?.close(); } catch { /* ignore */ }
       socketRef.current = null;
     };
-  }, [flushPendingMessages, paneTabId, reloadKey, tabId]);
+  }, [adoptCdpTabId, flushPendingMessages, paneTabId, reloadKey, tabId]);
 
   // Imperative handle: parent calls go/back/forward/reload directly. We do
   // NOT auto-navigate when `url` changes because that races with the live

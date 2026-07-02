@@ -9,12 +9,12 @@ import { SessionVaultPanel } from "./SessionVaultPanel";
 import { QuotaPanel } from "./QuotaPanel";
 import { AgentsPanel } from "./AgentsPanel";
 import { WorkspaceSettingsPanel } from "./WorkspaceSettingsPanel";
-import { SourceTreePanel } from "./SourceTreePanel";
+import { useAppDialog } from "./AppDialog";
 import { api } from "../lib/api";
 import type { AppState, SplitNode, Surface, TerminalTheme, Workspace } from "../lib/api";
-import { BellIcon, PlusIcon, RocketIcon, XIcon } from "./icons";
+import { BellIcon, PlusIcon, XIcon } from "./icons";
 
-export type PanelId = "sidebar" | "agentChat" | "logs" | "vault" | "quota" | "agents" | "wsSettings" | "tree";
+export type PanelId = "sidebar" | "agentChat" | "logs" | "vault" | "quota" | "agents" | "wsSettings";
 export const DOCK_LAYOUT_STORAGE_KEY = "cmux3.dockLayout.v4";
 
 export const DOCK_PANELS: { id: PanelId; label: string }[] = [
@@ -25,7 +25,6 @@ export const DOCK_PANELS: { id: PanelId; label: string }[] = [
   { id: "quota", label: "Quota" },
   { id: "agents", label: "AI Agents" },
   { id: "wsSettings", label: "SSH / Env" },
-  { id: "tree", label: "Source Tree" },
 ];
 
 // Shared context so dockview-hosted panels can read live app state/handlers.
@@ -63,11 +62,11 @@ interface DockCtx {
   selectWorkspace: (id: string) => void;
   closeWorkspace: (id: string) => void;
   newWorkspace: () => void;
+  workspaceRenameRequest?: { id: string; token: number } | null;
   wsStatus: Record<string, { branch?: string; workingDirectory?: string; unread: number }>;
   unread: number;
   broadcast: boolean;
   openNotifications: () => void;
-  openTrex: () => void;
   terminalHeader: ReactNode;
   focusDockPanel?: (id: string) => void;
   dockApi?: DockviewApi;
@@ -243,7 +242,6 @@ function panelBody(id: PanelId, d: DockCtx, close: () => void) {
     case "quota": return <QuotaPanel onClose={close} />;
     case "agents": return <AgentsPanel onClose={close} onSend={d.insertIntoFocused} />;
     case "wsSettings": return d.workspace ? <WorkspaceSettingsPanel workspace={d.workspace} onClose={close} /> : null;
-    case "tree": return <SourceTreePanel initialPath={d.focusedCwd} onClose={close} />;
   }
 }
 
@@ -265,18 +263,26 @@ function ToolContent(props: IDockviewPanelProps) {
 
 function WorkspacesContent() {
   const d = useDock();
+  const dialog = useAppDialog();
   const [menu, setMenu] = useState<{ x: number; y: number; workspace: Workspace } | null>(null);
   const [menuFlipY, setMenuFlipY] = useState(false);
   const [menuFlipX, setMenuFlipX] = useState(false);
   const [filter, setFilter] = useState("");
+  const [editingWorkspaceId, setEditingWorkspaceId] = useState<string | null>(null);
+  const [editingWorkspaceName, setEditingWorkspaceName] = useState("");
   const menuRef = useRef<HTMLDivElement>(null);
   const setAccent = async (workspace: Workspace, accentColor: string) => {
     await api.updateWorkspace(workspace.id, { accentColor }).catch(() => {});
     d.refresh();
   };
-  const rename = async (workspace: Workspace) => {
-    const name = prompt("Rename workspace", workspace.name);
-    if (!name) return;
+  const startRename = (workspace: Workspace) => {
+    setEditingWorkspaceId(workspace.id);
+    setEditingWorkspaceName(workspace.name);
+  };
+  const commitRename = async (workspace: Workspace) => {
+    const name = editingWorkspaceName.trim();
+    setEditingWorkspaceId(null);
+    if (!name || name === workspace.name) return;
     await api.updateWorkspace(workspace.id, { name }).catch(() => {});
     d.refresh();
   };
@@ -285,10 +291,16 @@ function WorkspacesContent() {
     d.refresh();
   };
   const setCustomAccent = async (workspace: Workspace) => {
-    const color = prompt("Workspace accent color", workspace.accentColor || "#818CF8");
+    const color = await dialog.prompt("Workspace accent color", workspace.accentColor || "#818CF8", "Enter a CSS color value.");
     if (!color) return;
     await setAccent(workspace, color);
   };
+  useEffect(() => {
+    const req = d.workspaceRenameRequest;
+    if (!req) return;
+    const workspace = d.state.workspaces.find((w) => w.id === req.id);
+    if (workspace) startRename(workspace);
+  }, [d.workspaceRenameRequest?.token]);
   const colors = [
     ["Indigo", "#818CF8"],
     ["Green", "#10B981"],
@@ -362,7 +374,22 @@ function WorkspacesContent() {
             <span className="ws-info">
               <span className="ws-title-row">
                 <span className="ws-accent-dot" style={{ background: w.accentColor }} />
-                <span className="ws-name">{w.name}</span>
+                {editingWorkspaceId === w.id ? (
+                  <input
+                    className="ws-name-input"
+                    value={editingWorkspaceName}
+                    autoFocus
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={(e) => setEditingWorkspaceName(e.target.value)}
+                    onBlur={() => { void commitRename(w); }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") { e.preventDefault(); void commitRename(w); }
+                      if (e.key === "Escape") { e.preventDefault(); setEditingWorkspaceId(null); }
+                    }}
+                  />
+                ) : (
+                  <span className="ws-name" onDoubleClick={(e) => { e.stopPropagation(); startRename(w); }}>{w.name}</span>
+                )}
               </span>
               {(d.wsStatus[w.id]?.branch) && <span className="ws-branch mono">{d.wsStatus[w.id]?.branch}</span>}
               {paneInfoLines(w).map((line) => <span key={line} className="ws-pane-line mono">{line}</span>)}
@@ -375,7 +402,6 @@ function WorkspacesContent() {
       <div className="sidebar-foot">
         <button className="side-tool" onClick={d.newWorkspace}><PlusIcon /><span>New Workspace</span></button>
         <button className="side-tool" onClick={d.openNotifications}><BellIcon /><span>Notifications</span>{d.unread > 0 && <span className="side-badge">{d.unread}</span>}</button>
-        <button className="side-tool" onClick={d.openTrex}><RocketIcon /><span>T-Rex Runner</span></button>
       </div>
       {menu && (
         <div
@@ -388,7 +414,7 @@ function WorkspacesContent() {
           }}
           onMouseDown={(e) => e.stopPropagation()}
         >
-          <button onClick={() => { const w = menu.workspace; setMenu(null); void rename(w); }}>Rename<span>F2</span></button>
+          <button onClick={() => { const w = menu.workspace; setMenu(null); startRename(w); }}>Rename<span>F2</span></button>
           <button onClick={() => { const w = menu.workspace; setMenu(null); void duplicate(w); }}>Duplicate</button>
           <button disabled>Set Workspace Icon</button>
           <button onClick={() => { setMenu(null); d.selectWorkspace(menu.workspace.id); }}>Select Workspace</button>
@@ -512,6 +538,37 @@ function writeSavedDockLayout(api: DockviewApi) {
   try {
     window.localStorage.setItem(DOCK_LAYOUT_STORAGE_KEY, JSON.stringify(api.toJSON()));
   } catch { }
+}
+
+function sanitizeSavedDockLayout(layout: any, validPanelIds: Set<string>): any | null {
+  if (!layout || typeof layout !== "object") return null;
+  const clone = structuredClone(layout);
+  const panels = clone.panels;
+  if (Array.isArray(panels)) {
+    clone.panels = panels.filter((p: any) => p?.id && validPanelIds.has(p.id));
+  } else if (panels && typeof panels === "object") {
+    for (const id of Object.keys(panels)) {
+      if (!validPanelIds.has(id)) delete panels[id];
+    }
+  }
+
+  const prune = (node: any): any | null => {
+    if (!node || typeof node !== "object") return null;
+    if (Array.isArray(node.children)) {
+      node.children = node.children.map(prune).filter(Boolean);
+      return node.children.length > 0 ? node : null;
+    }
+    if (Array.isArray(node.panels)) {
+      node.panels = node.panels.filter((id: string) => validPanelIds.has(id));
+      return node.panels.length > 0 ? node : null;
+    }
+    if (typeof node.activePanel === "string" && !validPanelIds.has(node.activePanel))
+      delete node.activePanel;
+    return node;
+  };
+
+  if (clone.grid?.root) clone.grid.root = prune(clone.grid.root);
+  return clone.grid?.root ? clone : null;
 }
 
 export function DockLayout({ openPanels, uiTheme, ...ctx }: Props) {
@@ -666,9 +723,16 @@ export function DockLayout({ openPanels, uiTheme, ...ctx }: Props) {
     const savedLayout = readSavedDockLayout();
     if (savedLayout) {
       try {
-        e.api.fromJSON(savedLayout);
+        const validPanelIds = new Set<string>([
+          ...DOCK_PANELS.map((p) => p.id),
+          ...(ctx.workspace?.surfaces.map((s) => s.id) ?? []),
+        ]);
+        if ((ctx.workspace?.surfaces.length ?? 0) === 0) validPanelIds.add("surface-starter");
+        const sanitized = sanitizeSavedDockLayout(savedLayout, validPanelIds);
+        if (sanitized) e.api.fromJSON(sanitized);
         normalizeToolPanelWidths(e.api);
         scheduleNormalizePanelOrder(e.api);
+        writeSavedDockLayout(e.api);
       } catch {
         e.api.clear();
       }
@@ -736,43 +800,50 @@ export function DockLayout({ openPanels, uiTheme, ...ctx }: Props) {
     const ws = ctx.workspace;
     if (!api || !readyRef.current || !ws) return;
     const surfaceIds = new Set(ws.surfaces.map((s) => s.id));
-    // Create panels for surfaces that don't have one yet.
-    for (const s of ws.surfaces) {
-      if (!api.getPanel(s.id)) {
-        // Find a sibling surface panel to anchor next to (so the new tab joins
-        // the same group instead of spawning a separate dock area).
-        let position: any = { direction: "right" as const };
-        for (const existingId of surfaceIds) {
-          if (existingId !== s.id) {
-            const anchor = api.getPanel(existingId);
-            if (anchor) {
-              position = { referencePanel: existingId, direction: "within" as const };
-              break;
+    absorbWithTerminal(api, () => {
+      if (surfaceIds.size > 0) {
+        const starter = api.getPanel("surface-starter");
+        if (starter) {
+          try { starter.api.close(); } catch { /* ignore stale starter cleanup */ }
+        }
+      }
+      // Create panels for surfaces that don't have one yet.
+      for (const s of ws.surfaces) {
+        if (!api.getPanel(s.id)) {
+          // Find a sibling surface panel to anchor next to (so the new tab joins
+          // the same group instead of spawning a separate dock area).
+          let position: any = { direction: "right" as const };
+          for (const existingId of surfaceIds) {
+            if (existingId !== s.id) {
+              const anchor = api.getPanel(existingId);
+              if (anchor) {
+                position = { referencePanel: existingId, direction: "within" as const };
+                break;
+              }
             }
           }
+          const title = s.name || `Surface ${surfaceIds.size + 1}`;
+          api.addPanel({
+            id: s.id,
+            component: "surface",
+            tabComponent: "toolTab",
+            title,
+            position,
+          });
+        } else {
+          const p = api.getPanel(s.id);
+          if (p && p.title !== s.name) p.api.setTitle(s.name);
         }
-        const title = s.name || `Surface ${surfaceIds.size + 1}`;
-        api.addPanel({
-          id: s.id,
-          component: "surface",
-          tabComponent: "toolTab",
-          title,
-          position,
-        });
-      } else {
-        const p = api.getPanel(s.id);
-        if (p && p.title !== s.name) p.api.setTitle(s.name);
       }
-    }
-    // Close panels for surfaces that no longer exist.
-    for (const p of api.panels) {
-      if (p.id === "sidebar") continue;
-      if (DOCK_PANELS.some((dp) => dp.id === p.id)) continue;
-      if (!surfaceIds.has(p.id)) {
-        try { p.api.close(); } catch { /* ignore */ }
+      // Close panels for surfaces that no longer exist.
+      for (const p of api.panels) {
+        if (p.id === "sidebar") continue;
+        if (DOCK_PANELS.some((dp) => dp.id === p.id)) continue;
+        if (!surfaceIds.has(p.id)) {
+          try { p.api.close(); } catch { /* ignore */ }
+        }
       }
-    }
-    scheduleNormalizePanelOrder(api);
+    });
   }, [ctx.workspace?.surfaces.length, ctx.workspace?.surfaces.map((s) => s.id + ":" + s.name).join(",")]);
 
   // Reconcile tool panels.

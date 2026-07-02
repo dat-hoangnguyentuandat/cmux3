@@ -67,7 +67,7 @@ export const api = {
   saveSettings: (s: any) => req<any>("/api/settings", { method: "PUT", headers: j, body: JSON.stringify(s) }),
   getShells: () => req<{ name: string; path: string }[]>("/api/shells"),
 
-  createWorkspace: (name: string, workingDirectory?: string) =>
+  createWorkspace: (name?: string, workingDirectory?: string) =>
     req<Workspace>("/api/workspaces", { method: "POST", headers: j, body: JSON.stringify({ name, workingDirectory }) }),
   deleteWorkspace: (id: string) => req<void>(`/api/workspaces/${id}`, { method: "DELETE" }),
   selectWorkspace: (id: string) => req<void>(`/api/workspaces/${id}/select`, { method: "POST" }),
@@ -160,6 +160,8 @@ export const api = {
   getPorts: (paneId: string) => req<number[]>(`/api/ports?paneId=${paneId}`),
   closeClientTab: (clientTabId: string) =>
     req<void>(`/api/browser/client-tab/${encodeURIComponent(clientTabId)}`, { method: "DELETE", keepalive: true }),
+  forgetClientTab: (clientTabId: string) =>
+    req<void>(`/api/browser/client-tab/${encodeURIComponent(clientTabId)}/binding`, { method: "DELETE", keepalive: true }),
   cleanupOrphanBrowserTabs: () =>
     req<void>("/api/browser/cleanup-orphans", { method: "POST", keepalive: true }),
   canEmbed: (url: string) =>
@@ -177,11 +179,12 @@ export const api = {
   getWorkspaceEnv: (id: string) => req<Record<string, string>>(`/api/workspaces/${id}/env`),
   setWorkspaceEnv: (id: string, env: Record<string, string>) =>
     req<Record<string, string>>(`/api/workspaces/${id}/env`, { method: "PUT", headers: j, body: JSON.stringify(env) }),
-  getFiles: (path: string) => req<FileListing>(`/api/files?path=${encodeURIComponent(path)}`),
+  chooseFile: (initialDirectory?: string) =>
+    req<{ path: string } | undefined>(`/api/dialog/open-file${initialDirectory ? `?initialDirectory=${encodeURIComponent(initialDirectory)}` : ""}`, { method: "POST" }),
+  setClipboardImageFile: (path: string) =>
+    req<void>("/api/clipboard/image-file", { method: "POST", headers: j, body: JSON.stringify({ path }) }),
   quickOpen: (root: string, q?: string) =>
     req<{ fullPath: string; name: string }[]>(`/api/quick-open?root=${encodeURIComponent(root)}${q ? `&q=${encodeURIComponent(q)}` : ""}`),
-  getFileContent: (path: string) => fetch(`/api/files/content?path=${encodeURIComponent(path)}`).then((r) => r.text()),
-  getKnowledgeGraph: (cwd: string) => req<KnowledgeGraph>(`/api/knowledge-graph?cwd=${encodeURIComponent(cwd)}`),
   getWorkspaceSsh: (id: string) => req<SshProfile[]>(`/api/workspaces/${id}/ssh`),
   setWorkspaceSsh: (id: string, profiles: SshProfile[]) =>
     req<SshProfile[]>(`/api/workspaces/${id}/ssh`, { method: "PUT", headers: j, body: JSON.stringify(profiles) }),
@@ -200,12 +203,6 @@ export interface ExternalAgent {
   typeLabel: string;
   statusLabel: string;
 }
-
-export interface FileEntry { name: string; fullPath: string; isDirectory: boolean; size: number; }
-export interface FileListing { path: string; parent?: string; entries: FileEntry[]; error?: string; }
-export interface KgNode { id: string; name: string; kind: string; filePath: string; degree: number; communityId: number; }
-export interface KgEdge { sourceId: string; targetId: string; type: string; confidence: number; }
-export interface KnowledgeGraph { repoRoot: string; nodes: KgNode[]; edges: KgEdge[]; }
 
 export interface SshProfile {
   id: string;

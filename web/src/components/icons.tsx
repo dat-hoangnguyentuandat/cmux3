@@ -55,7 +55,3 @@ export function FolderIcon(props: IconProps) {
 export function DownloadIcon(props: IconProps) {
   return <svg {...svgProps(props)}><path d="M8 2.5V10M5 7L8 10L11 7M3.5 13H12.5" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" /></svg>;
 }
-
-export function RocketIcon(props: IconProps) {
-  return <svg {...svgProps(props)}><path d="M9.6 2.5C11.3 2.7 12.6 3.9 12.8 5.6L9.2 9.2L6.8 6.8L9.6 2.5Z" stroke="currentColor" strokeLinejoin="round" /><path d="M6.8 6.8L4.3 6.4L3 7.7L5.8 8.2M9.2 9.2L9.6 11.7L8.3 13L7.8 10.2M5.2 10.8L3.5 12.5" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" /></svg>;
-}

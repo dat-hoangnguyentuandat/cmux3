@@ -113,7 +113,7 @@ public sealed class ChromeCdpProvider : IBrowserProvider
             psi.ArgumentList.Add("--disable-backgrounding-occluded-windows");
             psi.ArgumentList.Add("--disable-renderer-backgrounding");
             psi.ArgumentList.Add("--disable-background-timer-throttling");
-            psi.ArgumentList.Add("https://www.google.com/webhp?igu=1");
+            psi.ArgumentList.Add("about:blank");
             _browserProcess = Process.Start(psi);
             return true;
         }

@@ -99,6 +99,7 @@ public static class SettingsService
     public static void Save(CmuxSettings? settings = null)
     {
         settings ??= Current;
+        MigrateClaudibleToCustomProvider(settings);
 
         try
         {
@@ -108,6 +109,8 @@ public static class SettingsService
             var json = JsonSerializer.Serialize(settings, JsonOptions);
             File.WriteAllText(tmpPath, json);
             File.Move(tmpPath, SettingsPath, overwrite: true);
+            _current = settings;
+            NotifyChanged();
         }
         catch
         {

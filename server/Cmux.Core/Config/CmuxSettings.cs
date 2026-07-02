@@ -34,8 +34,6 @@ public class CmuxSettings
     public bool BracketedPaste { get; set; } = true;
     public string WordSeparators { get; set; } = " \t\n{}[]()\"'`,:;<>";
     public bool VimMode { get; set; } = false;
-    // Knowledge Graph: auto-index repos (.gitnexus) + per-pane mini graph overlay.
-    public bool KnowledgeGraphEnabled { get; set; } = false;
 
     // ── Input ──────────────────────────────────────────────────
     // Vietnamese typing on Windows is handled by the OS TSF IME (Unikey /

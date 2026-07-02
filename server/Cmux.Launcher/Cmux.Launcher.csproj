@@ -8,8 +8,8 @@
     <RootNamespace>Cmux.Launcher</RootNamespace>
     <AssemblyName>cmux3</AssemblyName>
     <UseWindowsForms>true</UseWindowsForms>
-    <Version>0.1.0</Version>
-    <InformationalVersion>0.1.0</InformationalVersion>
+    <Version>0.1.2</Version>
+    <InformationalVersion>0.1.2</InformationalVersion>
   </PropertyGroup>
 
 </Project>

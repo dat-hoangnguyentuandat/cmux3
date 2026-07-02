@@ -1,4 +1,5 @@
 using System.Net.WebSockets;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Text.Json;
@@ -17,7 +18,6 @@ builder.Services.AddSingleton<Cmux.Core.Services.SnippetService>();
 builder.Services.AddSingleton<Cmux.Core.Services.WorkspaceTemplateService>();
 builder.Services.AddSingleton<Cmux.Core.Services.AgentConversationStoreService>();
 builder.Services.AddSingleton<Cmux.Core.Services.AgentQuotaService>();
-builder.Services.AddSingleton<Cmux.Core.Services.KnowledgeGraphService>();
 builder.Services.AddSingleton<Cmux.Web.Services.AgentRuntimeService>();
 builder.Services.AddSingleton<TerminalSessionManager>();
 builder.Services.AddSingleton<Cmux.Web.Services.Browser.IBrowserProvider>(_ => new Cmux.Web.Services.Browser.ChromeCdpProvider());
@@ -58,6 +58,12 @@ app.MapGet("/api/state", (AppStateStore store) => Results.Json(store.State, json
 
 app.MapPost("/api/workspaces", (AppStateStore store, CreateWorkspaceReq req) =>
 {
+    var baseName = string.IsNullOrWhiteSpace(req.Name) ? "Workspace" : req.Name.Trim();
+    var usedNames = new HashSet<string>(store.State.Workspaces.Select(w => w.Name), StringComparer.OrdinalIgnoreCase);
+    var name = baseName;
+    for (var i = 2; usedNames.Contains(name); i++)
+        name = $"{baseName} {i}";
+
     var pane = new PaneDto { Type = "terminal" };
     var surface = new SurfaceDto
     {
@@ -68,7 +74,7 @@ app.MapPost("/api/workspaces", (AppStateStore store, CreateWorkspaceReq req) =>
     };
     var ws = new WorkspaceDto
     {
-        Name = string.IsNullOrWhiteSpace(req.Name) ? "Workspace" : req.Name,
+        Name = name,
         WorkingDirectory = req.WorkingDirectory,
         Surfaces = { surface },
         SelectedSurfaceId = surface.Id,
@@ -555,50 +561,24 @@ app.MapPut("/api/workspaces/{id}/ssh", (AppStateStore store, string id, List<Ssh
     return Results.Json(ws.SshProfiles, json);
 });
 
-// ── Knowledge graph ─────────────────────────────────────────────────
-app.MapGet("/api/knowledge-graph", async (Cmux.Core.Services.KnowledgeGraphService svc, string cwd) =>
+app.MapPost("/api/dialog/open-file", async (string? initialDirectory) =>
 {
-    var root = Cmux.Core.Services.GitNexusService.ResolveRepoRoot(cwd) ?? cwd;
-    if (string.IsNullOrWhiteSpace(root) || !Directory.Exists(root))
-        return Results.Json(new { nodes = Array.Empty<object>(), edges = Array.Empty<object>() }, json);
-    var snap = await svc.BuildFileTreeSnapshotAsync(root);
-    return Results.Json(new { repoRoot = snap.RepoRoot, nodes = snap.Nodes, edges = snap.Edges }, json);
+    var path = await Program.ShowOpenFileDialogAsync(initialDirectory);
+    return string.IsNullOrWhiteSpace(path)
+        ? Results.NoContent()
+        : Results.Json(new { path }, json);
 });
-// ── Source tree (directory listing) ─────────────────────────────────
-app.MapGet("/api/files", (string path) =>
+
+app.MapPost("/api/clipboard/image-file", async (ClipboardImageReq req) =>
 {
-    if (string.IsNullOrWhiteSpace(path) || !Directory.Exists(path))
-        return Results.Json(new { path, entries = Array.Empty<object>() }, json);
-    try
-    {
-        var dir = new DirectoryInfo(path);
-        var entries = dir.EnumerateFileSystemInfos()
-            .Where(e => !e.Name.StartsWith('.') || e.Name is ".gitignore" or ".env")
-            .OrderByDescending(e => (e.Attributes & FileAttributes.Directory) != 0)
-            .ThenBy(e => e.Name, StringComparer.OrdinalIgnoreCase)
-            .Select(e => new
-            {
-                name = e.Name,
-                fullPath = e.FullName,
-                isDirectory = (e.Attributes & FileAttributes.Directory) != 0,
-                size = e is FileInfo fi ? fi.Length : 0L,
-            })
-            .ToArray();
-        return Results.Json(new { path = dir.FullName, parent = dir.Parent?.FullName, entries }, json);
-    }
-    catch (Exception ex) { return Results.Json(new { path, error = ex.Message, entries = Array.Empty<object>() }, json); }
+    if (string.IsNullOrWhiteSpace(req.Path) || !File.Exists(req.Path))
+        return Results.NotFound();
+    if (!Program.IsSupportedClipboardImage(req.Path))
+        return Results.BadRequest(new { error = "File is not a supported image." });
+    await Program.SetClipboardImageFileAsync(req.Path);
+    return Results.Ok();
 });
-app.MapGet("/api/files/content", (string path) =>
-{
-    if (!File.Exists(path)) return Results.NotFound();
-    try
-    {
-        var info = new FileInfo(path);
-        if (info.Length > 2 * 1024 * 1024) return Results.Text($"<file too large: {info.Length} bytes>");
-        return Results.Text(File.ReadAllText(path));
-    }
-    catch (Exception ex) { return Results.Text($"<error: {ex.Message}>"); }
-});
+
 // ── Quick open (fuzzy file finder) ──────────────────────────────────
 app.MapGet("/api/quick-open", (string root, string? q) =>
 {
@@ -865,9 +845,235 @@ record UpdatePaneReq(string? Type, string? Url, string? Notes);
 record AgentSecretReq(string Name, string? Value);
 record AgentThreadCreateReq(string PaneId);
 record AgentSendReq(string PaneId, string Prompt, string? ThreadId);
+record ClipboardImageReq(string Path);
 
 public partial class Program
 {
+    public static bool IsSupportedClipboardImage(string path)
+        => Path.GetExtension(path).ToLowerInvariant() is ".png" or ".jpg" or ".jpeg" or ".gif" or ".bmp" or ".webp";
+
+    public static async Task SetClipboardImageFileAsync(string path)
+    {
+        try
+        {
+            await SetClipboardImageFileOutOfProcessAsync(path);
+            return;
+        }
+        catch
+        {
+            // Fall back to in-process STA clipboard access if PowerShell is not
+            // available or blocked.
+        }
+
+        await SetClipboardImageFileInProcessAsync(path);
+    }
+
+    private static async Task SetClipboardImageFileOutOfProcessAsync(string path)
+    {
+        var script = """
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$path = [Console]::In.ReadToEnd()
+if (-not [System.IO.File]::Exists($path)) { exit 2 }
+$img = [System.Drawing.Image]::FromFile($path)
+$bmp = New-Object System.Drawing.Bitmap($img)
+$img.Dispose()
+[System.Windows.Forms.Clipboard]::SetImage($bmp)
+$bmp.Dispose()
+""";
+        var encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
+        using var proc = new System.Diagnostics.Process();
+        proc.StartInfo = new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = "powershell.exe",
+            Arguments = $"-NoLogo -NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand {encoded}",
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        };
+        proc.Start();
+        await proc.StandardInput.WriteAsync(path);
+        proc.StandardInput.Close();
+        var errorTask = proc.StandardError.ReadToEndAsync();
+        await proc.WaitForExitAsync();
+        if (proc.ExitCode != 0)
+            throw new InvalidOperationException(await errorTask);
+    }
+
+    private static Task SetClipboardImageFileInProcessAsync(string path)
+    {
+        var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                using var image = System.Drawing.Image.FromFile(path);
+                using var bitmap = new System.Drawing.Bitmap(image);
+                System.Windows.Forms.Clipboard.SetImage(bitmap);
+                tcs.TrySetResult();
+            }
+            catch (Exception ex)
+            {
+                tcs.TrySetException(ex);
+            }
+        });
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.IsBackground = true;
+        thread.Start();
+        return tcs.Task;
+    }
+
+    public static async Task<string?> ShowOpenFileDialogAsync(string? initialDirectory)
+    {
+        return await ShowOpenFileDialogInProcessAsync(initialDirectory);
+    }
+
+    private static Task<string?> ShowOpenFileDialogInProcessAsync(string? initialDirectory)
+    {
+        var tcs = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                tcs.TrySetResult(NativeOpenFileDialog.Show(initialDirectory));
+            }
+            catch (Exception ex)
+            {
+                tcs.TrySetException(ex);
+            }
+        });
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.IsBackground = true;
+        thread.Start();
+        return tcs.Task;
+    }
+
+    private static class NativeOpenFileDialog
+    {
+        private const uint FOS_FILEMUSTEXIST = 0x00001000;
+        private const uint FOS_PATHMUSTEXIST = 0x00000800;
+        private const uint FOS_FORCEFILESYSTEM = 0x00000040;
+        private const uint SIGDN_FILESYSPATH = 0x80058000;
+        private const int HRESULT_CANCELLED = unchecked((int)0x800704C7);
+
+        public static string? Show(string? initialDirectory)
+        {
+            var dialog = (IFileOpenDialog)new FileOpenDialog();
+            try
+            {
+                dialog.GetOptions(out var options);
+                dialog.SetOptions(options | FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST | FOS_FORCEFILESYSTEM);
+                dialog.SetTitle("Choose file");
+
+                var dir = ResolveDialogInitialDirectory(initialDirectory);
+                if (!string.IsNullOrWhiteSpace(dir) &&
+                    SHCreateItemFromParsingName(dir, IntPtr.Zero, typeof(IShellItem).GUID, out var folder) == 0)
+                {
+                    try { dialog.SetFolder(folder); }
+                    finally { Marshal.ReleaseComObject(folder); }
+                }
+
+                var hr = dialog.Show(GetForegroundWindow());
+                if (hr == HRESULT_CANCELLED) return null;
+                Marshal.ThrowExceptionForHR(hr);
+
+                dialog.GetResult(out var result);
+                try
+                {
+                    result.GetDisplayName(SIGDN_FILESYSPATH, out var pathPtr);
+                    try { return Marshal.PtrToStringUni(pathPtr); }
+                    finally { Marshal.FreeCoTaskMem(pathPtr); }
+                }
+                finally
+                {
+                    Marshal.ReleaseComObject(result);
+                }
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(dialog);
+            }
+        }
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetForegroundWindow();
+
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = true)]
+        private static extern int SHCreateItemFromParsingName(
+            string pszPath,
+            IntPtr pbc,
+            [MarshalAs(UnmanagedType.LPStruct)] Guid riid,
+            [MarshalAs(UnmanagedType.Interface)] out IShellItem ppv);
+
+        [ComImport]
+        [Guid("DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7")]
+        private class FileOpenDialog { }
+
+        [ComImport]
+        [Guid("D57C7288-D4AD-4768-BE02-9D969532D960")]
+        [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface IFileOpenDialog
+        {
+            [PreserveSig] int Show(IntPtr parent);
+            void SetFileTypes(uint cFileTypes, IntPtr rgFilterSpec);
+            void SetFileTypeIndex(uint iFileType);
+            void GetFileTypeIndex(out uint piFileType);
+            void Advise(IntPtr pfde, out uint pdwCookie);
+            void Unadvise(uint dwCookie);
+            void SetOptions(uint fos);
+            void GetOptions(out uint pfos);
+            void SetDefaultFolder(IShellItem psi);
+            void SetFolder(IShellItem psi);
+            void GetFolder(out IShellItem ppsi);
+            void GetCurrentSelection(out IShellItem ppsi);
+            void SetFileName([MarshalAs(UnmanagedType.LPWStr)] string pszName);
+            void GetFileName([MarshalAs(UnmanagedType.LPWStr)] out string pszName);
+            void SetTitle([MarshalAs(UnmanagedType.LPWStr)] string pszTitle);
+            void SetOkButtonLabel([MarshalAs(UnmanagedType.LPWStr)] string pszText);
+            void SetFileNameLabel([MarshalAs(UnmanagedType.LPWStr)] string pszLabel);
+            void GetResult(out IShellItem ppsi);
+            void AddPlace(IShellItem psi, int fdap);
+            void SetDefaultExtension([MarshalAs(UnmanagedType.LPWStr)] string pszDefaultExtension);
+            void Close(int hr);
+            void SetClientGuid(ref Guid guid);
+            void ClearClientData();
+            void SetFilter(IntPtr pFilter);
+            void GetResults(out IntPtr ppenum);
+            void GetSelectedItems(out IntPtr ppsai);
+        }
+
+        [ComImport]
+        [Guid("43826D1E-E718-42EE-BC55-A1E261C37BFE")]
+        [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface IShellItem
+        {
+            void BindToHandler(IntPtr pbc, ref Guid bhid, ref Guid riid, out IntPtr ppv);
+            void GetParent(out IShellItem ppsi);
+            void GetDisplayName(uint sigdnName, out IntPtr ppszName);
+            void GetAttributes(uint sfgaoMask, out uint psfgaoAttribs);
+            void Compare(IShellItem psi, uint hint, out int piOrder);
+        }
+    }
+
+    private static string? ResolveDialogInitialDirectory(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return null;
+        try
+        {
+            if (Directory.Exists(path)) return Path.GetFullPath(path);
+            if (File.Exists(path))
+            {
+                var parent = Path.GetDirectoryName(Path.GetFullPath(path));
+                return !string.IsNullOrWhiteSpace(parent) && Directory.Exists(parent) ? parent : null;
+            }
+        }
+        catch { /* ignore invalid caller-supplied path */ }
+        return null;
+    }
+
     static SplitNodeDto? FindNodeById(SplitNodeDto node, string id)
     {
         if (node.Id == id) return node;

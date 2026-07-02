@@ -3,19 +3,18 @@ import { DockLayout, DOCK_LAYOUT_STORAGE_KEY, DOCK_PANELS, type PanelId } from "
 import { AgentSettingsPanel } from "./components/AgentSettingsPanel";
 import { CommandPalette } from "./components/CommandPalette";
 import { HistoryPicker } from "./components/HistoryPicker";
-import { KnowledgeGraphPanel } from "./components/KnowledgeGraphPanel";
 import { NotificationsPanel } from "./components/NotificationsPanel";
 import { SettingsModal } from "./components/SettingsModal";
 import { SnippetsPanel } from "./components/SnippetsPanel";
 import { TemplatesPanel } from "./components/TemplatesPanel";
 import { QuickOpen } from "./components/QuickOpen";
-import { TrexRunner } from "./components/TrexRunner";
+import { AppDialogProvider, useAppDialog } from "./components/AppDialog";
 import { api } from "./lib/api";
 import { terminalBus } from "./lib/terminalBus";
 import type { AppState, Surface, TerminalTheme, Workspace } from "./lib/api";
 import "./styles.css";
 
-type Overlay = "settings" | "notifications" | "snippets" | "history" | "templates" | "kg" | "trex" | "palette" | "quickOpen" | null;
+type Overlay = "settings" | "notifications" | "snippets" | "history" | "templates" | "palette" | "quickOpen" | null;
 
 function readSavedDockPanelIds(): string[] | null {
   try {
@@ -42,6 +41,15 @@ function initialActivePanels(): PanelId[] {
 }
 
 export default function App() {
+  return (
+    <AppDialogProvider>
+      <AppContent />
+    </AppDialogProvider>
+  );
+}
+
+function AppContent() {
+  const dialog = useAppDialog();
   const [state, setState] = useState<AppState | null>(null);
   const [themes, setThemes] = useState<TerminalTheme[]>([]);
   const [settings, setSettings] = useState<any>(null);
@@ -62,6 +70,12 @@ export default function App() {
   const [shells, setShells] = useState<{ name: string; path: string }[]>([]);
   const [shellMenuOpen, setShellMenuOpen] = useState(false);
   const [wsStatus, setWsStatus] = useState<Record<string, { branch?: string; workingDirectory?: string; unread: number }>>({});
+  const [workspaceRenameRequest, setWorkspaceRenameRequest] = useState<{ id: string; token: number } | null>(null);
+
+  const applySettings = useCallback((s: any) => {
+    setSettings(s);
+    document.documentElement.setAttribute("data-ui-theme", s?.uiThemeName ?? "Dark+");
+  }, []);
 
   const refresh = useCallback(async () => setState(await api.getState()), []);
   const refreshUnread = useCallback(() => {
@@ -83,7 +97,7 @@ export default function App() {
   useEffect(() => {
     refresh().then(() => {
       api.getThemes().then(setThemes).catch(() => {});
-      api.getSettings().then((s) => { setSettings(s); document.documentElement.setAttribute("data-ui-theme", s?.uiThemeName ?? "Dark"); }).catch(() => {});
+      api.getSettings().then(applySettings).catch(() => {});
     });
     api.getShells().then(setShells).catch(() => setShells([]));
     refreshUnread();
@@ -91,7 +105,15 @@ export default function App() {
       Notification.requestPermission().catch(() => {});
     const t = setInterval(refreshUnread, 5000);
     return () => clearInterval(t);
-  }, [refresh, refreshUnread]);
+  }, [refresh, refreshUnread, applySettings]);
+
+  useEffect(() => {
+    const suppressBrowserContextMenu = (e: MouseEvent) => {
+      e.preventDefault();
+    };
+    window.addEventListener("contextmenu", suppressBrowserContextMenu, { capture: true });
+    return () => window.removeEventListener("contextmenu", suppressBrowserContextMenu, { capture: true } as any);
+  }, []);
 
   const workspace = useMemo<Workspace | undefined>(
     () => state?.workspaces.find((w) => w.id === state.selectedWorkspaceId) ?? state?.workspaces[0], [state]);
@@ -128,7 +150,7 @@ export default function App() {
   const closeSurface = useCallback(async (sId: string) => {
     if (!workspace) return; await api.deleteSurface(workspace.id, sId); await refresh();
   }, [workspace, refresh]);
-  const newWorkspace = useCallback(async () => { await api.createWorkspace("Workspace"); await refresh(); }, [refresh]);
+  const newWorkspace = useCallback(async () => { await api.createWorkspace(); await refresh(); }, [refresh]);
   const newSurface = useCallback(async () => {
     if (!workspace) return; await api.createSurface(workspace.id); await refresh();
   }, [workspace, refresh]);
@@ -176,18 +198,16 @@ export default function App() {
 
   const renameWorkspace = useCallback(async () => {
     if (!workspace) return;
-    const name = prompt("Rename workspace", workspace.name);
-    if (!name) return;
-    await api.updateWorkspace(workspace.id, { name }).catch(() => {});
-    refresh();
-  }, [workspace, refresh]);
+    setActivePanels((p) => (p.includes("sidebar") ? p : [...p, "sidebar"]));
+    setWorkspaceRenameRequest({ id: workspace.id, token: Date.now() });
+  }, [workspace]);
 
   const renameSurface = useCallback(async (s: Surface) => {
-    const name = prompt("Rename surface", s.name);
+    const name = await dialog.prompt("Rename surface", s.name);
     if (!name || !workspace) return;
     await api.renameSurface(workspace.id, s.id, name).catch(() => {});
     refresh();
-  }, [workspace, refresh]);
+  }, [workspace, refresh, dialog]);
 
   const duplicateSurface = useCallback(async (s: Surface) => {
     if (!workspace) return;
@@ -401,8 +421,6 @@ export default function App() {
       else if (shift && !alt && k === "v") { e.preventDefault(); openPanel("vault"); }
       else if (shift && !alt && k === "q") { e.preventDefault(); openPanel("quota"); }
       else if (shift && !alt && k === "a") { e.preventDefault(); openPanel("agents"); }
-      else if (shift && !alt && k === "o") { e.preventDefault(); openPanel("tree"); }
-      else if (shift && !alt && k === "g") { e.preventDefault(); setOverlay("kg"); }
       else if (shift && !alt && k === "s") { e.preventDefault(); setOverlay("snippets"); }
       else if (shift && k === "z") { e.preventDefault(); toggleZoom(); }
       else if (alt && !shift && k === "b") { e.preventDefault(); setBroadcast((v) => !v); }
@@ -458,17 +476,15 @@ export default function App() {
       { label: "Session Vault", hint: "Ctrl+Shift+V", run: () => openPanel("vault") },
       { label: "Quota Tracking", hint: "Ctrl+Shift+Q", run: () => openPanel("quota") },
       { label: "AI Agents", hint: "Ctrl+Shift+A", run: () => openPanel("agents") },
-      { label: "Source Tree", hint: "Ctrl+Shift+O", run: () => openPanel("tree") },
-      { label: "Knowledge Graph", hint: "Ctrl+Shift+G", run: () => setOverlay("kg") },
       { label: "Terminal", run: () => { if (workspace?.surfaces.length === 0) newSurface(); } },
       { label: "Toggle Workspaces", hint: "Ctrl+B", run: () => toggleSidebar() },
       { label: "Agent Chat", hint: "Ctrl+Shift+J", run: () => openPanel("agentChat") },
     ],
     Help: [
       { label: "Keyboard Shortcuts", run: () => setOverlay("palette") },
-      { label: "About", run: () => alert("cmux3") },
+      { label: "About", run: () => { void dialog.alert("cmux3", "A terminal multiplexer for AI coding workflows."); } },
     ],
-  }), [newWorkspace, newSurface, splitPane, toggleZoom, workspace, surface, refresh, openPanel, toggleSidebar]);
+  }), [newWorkspace, newSurface, splitPane, toggleZoom, workspace, surface, refresh, openPanel, toggleSidebar, dialog]);
 
   const terminalHeader = (
     <div className="toolbar">
@@ -550,19 +566,18 @@ export default function App() {
           setPaneType={setPaneType} setRatio={setRatio} splitPane={splitPane} toggleZoom={toggleZoom}
           newSurface={newSurface} selectSurface={selectSurface} closeSurface={closeSurface} closePanel={closePanel} openPanel={openPanel}
           selectWorkspace={selectWorkspace} closeWorkspace={closeWorkspace} newWorkspace={newWorkspace}
+          workspaceRenameRequest={workspaceRenameRequest}
           wsStatus={wsStatus} unread={unread} broadcast={broadcast}
-          openNotifications={() => setOverlay("notifications")} openTrex={() => setOverlay("trex")}
+          openNotifications={() => setOverlay("notifications")}
           terminalHeader={terminalHeader}
         />
       </main>
       {overlay === "palette" && <CommandPalette commands={commands} onClose={() => setOverlay(null)} />}
-      {overlay === "settings" && <SettingsModal themes={themes} onClose={() => setOverlay(null)} onApplied={(s) => setSettings(s)} />}
+      {overlay === "settings" && <SettingsModal themes={themes} onClose={() => setOverlay(null)} onApplied={applySettings} />}
       {overlay === "notifications" && <NotificationsPanel onClose={() => setOverlay(null)} onChanged={refreshUnread} />}
       {overlay === "snippets" && <SnippetsPanel onClose={() => setOverlay(null)} onInsert={insertIntoFocused} />}
       {overlay === "history" && <HistoryPicker paneId={focusedPaneId} onClose={() => setOverlay(null)} onPick={insertIntoFocused} />}
       {overlay === "templates" && <TemplatesPanel onClose={() => setOverlay(null)} workspaceId={workspace?.id} workspaceName={workspace?.name} onApplied={refresh} />}
-      {overlay === "kg" && <KnowledgeGraphPanel cwd={focusedCwd} onClose={() => setOverlay(null)} />}
-      {overlay === "trex" && <TrexRunner onClose={() => setOverlay(null)} />}
       {overlay === "quickOpen" && <QuickOpen root={focusedCwd} onClose={() => setOverlay(null)} onPick={(p) => {}} />}
     </div>
     </div>

@@ -135,6 +135,12 @@ public static class BrowserEndpointExtensions
             return Results.Ok();
         });
 
+        app.MapDelete("/api/browser/client-tab/{clientTabId}/binding", async (BrowserManager m, string clientTabId) =>
+        {
+            await m.ForgetClientTabAsync(clientTabId, CancellationToken.None);
+            return Results.Ok();
+        });
+
         app.MapPost("/api/browser/cleanup-orphans", async (BrowserManager m) =>
         {
             await m.CleanupOrphanedTabsAsync(CancellationToken.None);
@@ -177,11 +183,15 @@ public static class BrowserEndpointExtensions
             var url = ctx.Request.Query["url"].FirstOrDefault();
             var tabId = ctx.Request.Query["tabId"].FirstOrDefault();
             var forceNew = ctx.Request.Query["new"].FirstOrDefault() == "1";
+            var adopt = ctx.Request.Query["adopt"].FirstOrDefault();
+            var initialWidth = int.TryParse(ctx.Request.Query["width"], out var iw) ? iw : 1280;
+            var initialHeight = int.TryParse(ctx.Request.Query["height"], out var ih) ? ih : 800;
+            var initialDpr = double.TryParse(ctx.Request.Query["dpr"], out var idpr) ? idpr : 1;
 
             BrowserScreencastSession? cast = null;
             try
             {
-                var target = await m.GetDebuggerTargetAsync(tabId, url, forceNew, CancellationToken.None);
+                var target = await m.GetDebuggerTargetAsync(tabId, url, forceNew, adopt, CancellationToken.None);
                 if (target == null)
                 {
                     await Send("ECould not open a browser tab to stream.");
@@ -192,7 +202,17 @@ public static class BrowserEndpointExtensions
                 cast.FrameReceived += async (b64) => await Send("F" + b64);
                 cast.MetaReceived += async (title, url) =>
                     await Send("M" + JsonSerializer.Serialize(new { title, url }, JsonOpts));
-                await cast.StartAsync(target.Value.debuggerWsUrl, CancellationToken.None);
+                cast.PopupTargetCreated += async (popupTabId, popupUrl, trusted) =>
+                {
+                    await Send("P" + JsonSerializer.Serialize(new { cdpTabId = popupTabId, url = popupUrl }, JsonOpts));
+                };
+                cast.PopupTargetClosed += async (popupTabId) =>
+                {
+                    await Send("X" + JsonSerializer.Serialize(new { cdpTabId = popupTabId }, JsonOpts));
+                };
+                await cast.StartAsync(target.Value.debuggerWsUrl, target.Value.tabId, initialWidth, initialHeight, initialDpr, CancellationToken.None);
+                if (string.IsNullOrEmpty(adopt) && !string.IsNullOrWhiteSpace(url) && url != "about:blank")
+                    await cast.NavigateAsync(url, CancellationToken.None);
                 await Send("R" + target.Value.tabId); // ready + resolved tab id
 
                 var buf = new byte[1 << 15];
